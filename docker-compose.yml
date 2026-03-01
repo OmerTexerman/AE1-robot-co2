@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      TRANSCRIBE_PROVIDER: ${TRANSCRIBE_PROVIDER:-local}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_TRANSCRIBE_MODEL: ${OPENAI_TRANSCRIBE_MODEL:-gpt-4o-mini-transcribe}
+      LOCAL_WHISPER_MODEL: ${LOCAL_WHISPER_MODEL:-small}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-auto}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+    volumes:
+      - ./data:/app/data
+      - whisper-cache:/root/.cache/huggingface
+
+volumes:
+  whisper-cache:

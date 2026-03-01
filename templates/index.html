@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice to Text</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <p class="eyebrow">Speech to Text</p>
+        <h1>Speak in almost any language</h1>
+        <p class="intro">
+          This app records your voice in the browser, transcribes it with either
+          local Whisper or the OpenAI API       
+        </p>
+        <div class="controls">
+          <label class="provider-picker">
+            <span>Transcription mode</span>
+            <select id="providerSelect">
+              <option value="local">Local Whisper</option>
+              <option value="openai">OpenAI API</option>
+            </select>
+          </label>
+          <button id="recordButton" class="primary">Start recording</button>
+          <button id="stopButton" class="secondary" disabled>Stop</button>
+        </div>
+
+        <div class="status-card">
+          <span class="dot" id="statusDot"></span>
+          <p id="statusText">Ready to record.</p>
+        </div>
+
+        <div id="progressPanel" class="progress-panel" hidden>
+          <div class="progress-top">
+            <div class="spinner" aria-hidden="true"></div>
+            <div class="progress-copy">
+              <p id="progressTitle" class="progress-title">Transcription in progress</p>
+              <p id="progressDetail" class="progress-detail">Preparing audio...</p>
+            </div>
+            <p id="progressElapsed" class="progress-elapsed">0s</p>
+          </div>
+          <div class="progress-track" aria-hidden="true">
+            <div class="progress-bar"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="result-panel">
+        <div class="result-header">
+          <p class="result-label">Transcript</p>
+          <p id="scriptLabel" class="script-label">Font: waiting</p>
+        </div>
+        <article id="transcriptText" class="transcript">
+          Your text will appear here after recording.
+        </article>
+      </section>
+
+      <section class="history-panel">
+        <div class="result-header">
+          <p class="result-label">History</p>
+          <p class="script-label">Latest 12 transcripts</p>
+        </div>
+        <div id="historyList" class="history-list">
+          <p class="history-empty">No transcripts yet.</p>
+        </div>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

@@ -1,13 +1,9 @@
 {
-	"name": "Python 3",
-	"image": "mcr.microsoft.com/devcontainers/python:1-3.12-bullseye",
-	
-	"runArgs": [
-        	"--dns=100.100.100.100",
-        	"--dns=1.1.1.1",
-        	"--dns=8.8.8.8"
-    ], 
-
-
-	"postCreateCommand": "curl -LsSf https://astral.sh/uv/install.sh | sh"
+  "name": "voice-to-text-dev",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": ".."
+  },
+  "forwardPorts": [8000],
+  "postCreateCommand": "pip install -r requirements.txt"
 }
