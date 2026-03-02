@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
-from font_selector import choose_font
+from font_selector import build_google_fonts_url, choose_font
 from history_store import init_db, list_transcripts, save_transcript
 from robot_client import (
     RobotClientError,
@@ -41,7 +41,7 @@ def index():
 def history():
     items = list_transcripts()
     for item in items:
-        item["font_url"] = choose_font(item["text"])["font_url"]
+        item["font_url"] = build_google_fonts_url(item["font_family"])
     return jsonify({"items": items})
 
 
@@ -275,22 +275,25 @@ def transcribe():
     if not text:
         return jsonify({"error": "The transcription service returned empty text."}), 500
 
-    font = choose_font(text)
+    language = str(transcription.get("language") or "")
+    font = choose_font(text, language)
     created_at = datetime.now(timezone.utc).isoformat()
     transcript_id = save_transcript(
         text=text,
         script=font["script"],
         font_family=font["font_family"],
         provider=transcription["provider"],
+        language=language,
         created_at=created_at,
     )
     app.logger.info(
-        "transcribe completed transcript_id=%s provider=%s chars=%s script=%s font=%s",
+        "transcribe completed transcript_id=%s provider=%s chars=%s script=%s font=%s language=%s",
         transcript_id,
         transcription["provider"],
         len(text),
         font["script"],
         font["font_family"],
+        language,
     )
 
     return jsonify(
@@ -301,6 +304,8 @@ def transcribe():
             "font_family": font["font_family"],
             "font_url": font["font_url"],
             "provider": transcription["provider"],
+            "language": language,
+            "language_confidence": transcription.get("language_confidence"),
             "created_at": created_at,
         }
     )

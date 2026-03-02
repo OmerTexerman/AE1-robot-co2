@@ -22,6 +22,28 @@ SCRIPT_FONTS = {
     "thai": "Noto Sans Thai",
 }
 
+LANGUAGE_SCRIPTS = {
+    "ar": "arabic",
+    "bg": "cyrillic",
+    "bn": "bengali",
+    "el": "greek",
+    "gu": "gujarati",
+    "he": "hebrew",
+    "hi": "devanagari",
+    "ja": "japanese",
+    "kn": "kannada",
+    "ko": "korean",
+    "ml": "malayalam",
+    "mr": "devanagari",
+    "pa": "gurmukhi",
+    "ru": "cyrillic",
+    "ta": "tamil",
+    "te": "telugu",
+    "th": "thai",
+    "uk": "cyrillic",
+    "zh": "cjk",
+}
+
 
 def codepoint_in_ranges(codepoint: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start <= codepoint <= end for start, end in ranges)
@@ -79,6 +101,19 @@ def detect_script(text: str) -> str:
     return counts.most_common(1)[0][0]
 
 
+def normalize_language(language: str | None) -> str | None:
+    if not language:
+        return None
+    return language.lower().split("-", 1)[0]
+
+
+def fallback_script_for_language(language: str | None) -> str | None:
+    normalized_language = normalize_language(language)
+    if normalized_language is None:
+        return None
+    return LANGUAGE_SCRIPTS.get(normalized_language)
+
+
 def build_google_fonts_url(font_family: str) -> str:
     return (
         "https://fonts.googleapis.com/css2?family="
@@ -86,8 +121,10 @@ def build_google_fonts_url(font_family: str) -> str:
     )
 
 
-def choose_font(text: str) -> dict[str, str]:
-    script = detect_script(text)
+def choose_font(text: str, language: str | None = None) -> dict[str, str]:
+    detected_script = detect_script(text)
+    fallback_script = fallback_script_for_language(language)
+    script = fallback_script if detected_script == "latin" and fallback_script else detected_script
     font_family = SCRIPT_FONTS.get(script, SCRIPT_FONTS["latin"])
     return {
         "script": script,

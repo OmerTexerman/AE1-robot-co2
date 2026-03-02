@@ -17,6 +17,7 @@ STATE_PATH = "pairing_state.json"
 LAST_RENDER_PATH = "last_render.json"
 BUFFER_SIZE = 4096
 DISCOVERY_MAGIC = b"AE1_DISCOVERY_V1"
+CLIENT_TIMEOUT_SECONDS = 3
 
 
 def log(message):
@@ -75,20 +76,30 @@ def json_response(client, status_code, payload):
     client.send("\r\n".join(headers).encode())
 
 
+def error_response(client, status_code, message):
+    json_response(client, status_code, {"error": message})
+
+
 def parse_request(client):
     data = b""
     while b"\r\n\r\n" not in data and len(data) < BUFFER_SIZE:
-        chunk = client.recv(512)
+        try:
+            chunk = client.recv(512)
+        except OSError as exc:
+            raise ValueError("socket read failed: {}".format(exc))
         if not chunk:
-            break
+            raise ValueError("client disconnected before request headers completed")
         data += chunk
 
-    if not data:
-        return None
+    if b"\r\n\r\n" not in data:
+        raise ValueError("request headers too large or incomplete")
 
     header_blob, _, body = data.partition(b"\r\n\r\n")
     header_lines = header_blob.decode().split("\r\n")
-    method, path, _ = header_lines[0].split(" ", 2)
+    try:
+        method, path, _ = header_lines[0].split(" ", 2)
+    except ValueError:
+        raise ValueError("malformed request line")
     headers = {}
 
     for line in header_lines[1:]:
@@ -97,9 +108,18 @@ def parse_request(client):
         key, value = line.split(":", 1)
         headers[key.strip().lower()] = value.strip()
 
-    content_length = int(headers.get("content-length", "0"))
+    try:
+        content_length = int(headers.get("content-length", "0"))
+    except ValueError:
+        raise ValueError("invalid content length")
     while len(body) < content_length:
-        body += client.recv(512)
+        try:
+            chunk = client.recv(min(512, content_length - len(body)))
+        except OSError as exc:
+            raise ValueError("socket body read failed: {}".format(exc))
+        if not chunk:
+            raise ValueError("client disconnected before request body completed")
+        body += chunk
 
     payload = {}
     if content_length:
@@ -122,13 +142,15 @@ def hello_payload(ip_address, state):
         "ip_address": ip_address,
         "listen_port": secrets.LISTEN_PORT,
         "paired": bool(state.get("pair_token")),
-        "network_mode": getattr(secrets, "NETWORK_MODE", "wifi"),
     }
 
 
 def handle_request(client, ip_address):
-    request = parse_request(client)
-    if not request:
+    try:
+        request = parse_request(client)
+    except ValueError as exc:
+        log("request parse failed error={}".format(exc))
+        error_response(client, 400, "Bad request: {}".format(exc))
         return
 
     method, path, headers, payload = request
@@ -190,7 +212,6 @@ def handle_request(client, ip_address):
                 "device_name": secrets.DEVICE_NAME,
                 "device_id": device_id(),
                 "paired_client": state.get("paired_client"),
-                "network_mode": getattr(secrets, "NETWORK_MODE", "wifi"),
                 "last_render": last_render,
             },
         )
@@ -245,7 +266,6 @@ def handle_discovery(discovery_socket, ip_address):
 def serve():
     ip_address = connect_wifi()
     log("Robot Wi-Fi ready at http://{}:{}".format(ip_address, secrets.LISTEN_PORT))
-    log("Network mode: {}".format(getattr(secrets, "NETWORK_MODE", "wifi")))
     log("Pairing code: {}".format(secrets.PAIRING_CODE))
 
     tcp_address = socket.getaddrinfo("0.0.0.0", secrets.LISTEN_PORT)[0][-1]
@@ -271,6 +291,7 @@ def serve():
             if sock is tcp_server:
                 client, _addr = tcp_server.accept()
                 client.setblocking(True)
+                client.settimeout(CLIENT_TIMEOUT_SECONDS)
                 try:
                     handle_request(client, ip_address)
                 except Exception as exc:

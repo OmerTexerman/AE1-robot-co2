@@ -49,7 +49,7 @@ function renderHistory(items) {
   historyList.innerHTML = items
     .map(
       (i) => `<div class="history-item">
-        <small>${escapeHtml(i.provider)} &middot; ${escapeHtml(i.script)} &middot; ${escapeHtml(new Date(i.created_at).toLocaleString())}</small>
+        <small>${escapeHtml(i.provider)} &middot; ${escapeHtml(i.language || i.script)} &middot; ${escapeHtml(new Date(i.created_at).toLocaleString())}</small>
         <p style="font-family:'${escapeHtml(i.font_family)}',sans-serif">${escapeHtml(i.text)}</p>
       </div>`
     )
@@ -108,7 +108,7 @@ function renderDiscoveredRobots(items) {
         <div class="discovered-item">
           <div class="discovered-copy">
             <strong>${escapeHtml(item.device_name)}</strong>
-            <span>${escapeHtml(item.host)}:${escapeHtml(String(item.port))} · ${escapeHtml(item.network_mode)}</span>
+            <span>${escapeHtml(item.host)}:${escapeHtml(String(item.port))}</span>
           </div>
           <button type="button" class="use-robot-button" data-robot-index="${index}">
             Use This Robot
@@ -272,6 +272,8 @@ async function upload() {
   } catch (e) {
     transcript.textContent = "Transcription failed.";
     status.textContent = e.message;
+    currentTranscript = null;
+    sendTranscriptButton.disabled = true;
   } finally {
     recordButton.disabled = false;
     providerSelect.disabled = false;

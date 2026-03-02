@@ -12,17 +12,22 @@ def normalize_provider(requested_provider: str | None) -> str:
     return provider
 
 
-def transcribe_audio(audio_path: Path, provider: str) -> dict[str, str]:
+def transcribe_audio(audio_path: Path, provider: str) -> dict[str, str | float | None]:
     normalized_provider = normalize_provider(provider)
     if normalized_provider == "openai":
-        text = transcribe_with_openai(audio_path)
+        transcription = transcribe_with_openai(audio_path)
     else:
-        text = transcribe_with_local_whisper(audio_path)
+        transcription = transcribe_with_local_whisper(audio_path)
 
-    return {"provider": normalized_provider, "text": text.strip()}
+    return {
+        "provider": normalized_provider,
+        "text": str(transcription["text"]).strip(),
+        "language": transcription.get("language") or "",
+        "language_confidence": transcription.get("language_confidence"),
+    }
 
 
-def transcribe_with_openai(audio_path: Path) -> str:
+def transcribe_with_openai(audio_path: Path) -> dict[str, str | float | None]:
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -46,10 +51,14 @@ def transcribe_with_openai(audio_path: Path) -> str:
     text = getattr(transcription, "text", "").strip()
     if not text:
         raise RuntimeError("The OpenAI transcription service returned empty text.")
-    return text
+    return {
+        "text": text,
+        "language": getattr(transcription, "language", None),
+        "language_confidence": None,
+    }
 
 
-def transcribe_with_local_whisper(audio_path: Path) -> str:
+def transcribe_with_local_whisper(audio_path: Path) -> dict[str, str | float | None]:
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
@@ -62,9 +71,13 @@ def transcribe_with_local_whisper(audio_path: Path) -> str:
     compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
     model = WhisperModel(model_name, device=device, compute_type=compute_type)
-    segments, _info = model.transcribe(str(audio_path), vad_filter=True)
+    segments, info = model.transcribe(str(audio_path), vad_filter=True)
     text = " ".join(segment.text.strip() for segment in segments).strip()
 
     if not text:
         raise RuntimeError("The local Whisper model returned empty text.")
-    return text
+    return {
+        "text": text,
+        "language": getattr(info, "language", None),
+        "language_confidence": getattr(info, "language_probability", None),
+    }

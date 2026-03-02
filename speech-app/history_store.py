@@ -22,10 +22,19 @@ def init_db(db_path: Path | None = None) -> None:
                 script TEXT NOT NULL,
                 font_family TEXT NOT NULL,
                 provider TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             )
             """
         )
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(transcripts)").fetchall()
+        }
+        if "language" not in columns:
+            connection.execute(
+                "ALTER TABLE transcripts ADD COLUMN language TEXT NOT NULL DEFAULT ''"
+            )
         connection.commit()
 
 
@@ -34,6 +43,7 @@ def save_transcript(
     script: str,
     font_family: str,
     provider: str,
+    language: str,
     created_at: str,
     db_path: Path | None = None,
 ) -> int:
@@ -42,10 +52,10 @@ def save_transcript(
     with sqlite3.connect(database_path) as connection:
         cursor = connection.execute(
             """
-            INSERT INTO transcripts (text, script, font_family, provider, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO transcripts (text, script, font_family, provider, language, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (text, script, font_family, provider, created_at),
+            (text, script, font_family, provider, language, created_at),
         )
         connection.commit()
         return int(cursor.lastrowid)
@@ -58,7 +68,7 @@ def list_transcripts(limit: int = 12, db_path: Path | None = None) -> list[dict[
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             """
-            SELECT id, text, script, font_family, provider, created_at
+            SELECT id, text, script, font_family, provider, language, created_at
             FROM transcripts
             ORDER BY id DESC
             LIMIT ?

@@ -191,7 +191,6 @@ def normalize_discovered_robot(payload: dict, fallback_host: str) -> dict | None
         "device_name": payload.get("device_name", "Pico 2 W"),
         "device_id": payload.get("device_id", "unknown"),
         "paired": bool(payload.get("paired")),
-        "network_mode": payload.get("network_mode", "wifi"),
     }
 
 
@@ -291,11 +290,7 @@ def active_hello_probe() -> list[dict]:
     return list(discovered.values())
 
 
-def discover_robots(
-    discovery_port: int = DISCOVERY_PORT,
-    timeout_seconds: float = 1.5,
-) -> list[dict]:
-    _ = timeout_seconds
+def discover_robots(discovery_port: int = DISCOVERY_PORT) -> list[dict]:
     discovered: dict[str, dict] = {}
 
     for robot in udp_discovery(discovery_port):
