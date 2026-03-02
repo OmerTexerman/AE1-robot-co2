@@ -23,7 +23,6 @@ let audioChunks = [];
 let recordedMimeType = "audio/webm";
 let currentTranscript = null;
 let pairedRobot = null;
-let robotPollTimer;
 let discoveredRobotItems = [];
 
 function escapeHtml(s) {
@@ -39,6 +38,34 @@ function ensureFont(family, url) {
   link.href = url;
   link.dataset.font = family;
   document.head.appendChild(link);
+}
+
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  let payload = {};
+
+  try {
+    payload = await response.json();
+  } catch {
+    if (!response.ok) {
+      throw new Error("Request failed.");
+    }
+    return {};
+  }
+
+  if (!response.ok) {
+    throw new Error(payload.error || "Request failed.");
+  }
+
+  return payload;
+}
+
+function currentCandidatePorts() {
+  const port = Number(robotPortInput.value || 8080);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return [];
+  }
+  return [port];
 }
 
 function renderHistory(items) {
@@ -125,9 +152,7 @@ function renderDiscoveredRobots(items) {
 
 async function loadRobotState() {
   try {
-    const response = await fetch("/robot");
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error);
+    const payload = await fetchJson("/robot");
     renderRobotState(payload);
   } catch (error) {
     robotConnection.textContent = "Robot status unavailable.";
@@ -140,9 +165,11 @@ async function discoverRobots() {
   discoverRobotsButton.disabled = true;
 
   try {
-    const response = await fetch("/robot/discover", { method: "POST" });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error);
+    const payload = await fetchJson("/robot/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ports: currentCandidatePorts() }),
+    });
 
     renderDiscoveredRobots(payload.items);
     robotStatus.textContent = payload.items.length
@@ -160,7 +187,7 @@ async function pairRobot() {
   pairRobotButton.disabled = true;
 
   try {
-    const response = await fetch("/robot/pair", {
+    const payload = await fetchJson("/robot/pair", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -170,9 +197,6 @@ async function pairRobot() {
         client_name: robotClientNameInput.value,
       }),
     });
-
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error);
 
     robotPairingCodeInput.value = "";
     renderRobotState(payload);
@@ -189,13 +213,13 @@ async function unpairRobot() {
   unpairRobotButton.disabled = true;
 
   try {
-    const response = await fetch("/robot/unpair", { method: "POST" });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error);
+    const payload = await fetchJson("/robot/unpair", { method: "POST" });
     renderRobotState(payload);
     robotStatus.textContent = payload.warning || "Robot unpaired.";
   } catch (error) {
     robotStatus.textContent = error.message || "Unpair failed.";
+  } finally {
+    unpairRobotButton.disabled = !pairedRobot;
   }
 }
 
@@ -209,7 +233,7 @@ async function sendTranscriptToRobot() {
   sendTranscriptButton.disabled = true;
 
   try {
-    const response = await fetch("/robot/render", {
+    const payload = await fetchJson("/robot/render", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -218,9 +242,6 @@ async function sendTranscriptToRobot() {
         script: currentTranscript.script,
       }),
     });
-
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error);
 
     robotStatus.textContent = `Robot accepted job ${payload.job_id}.`;
   } catch (error) {
@@ -232,9 +253,7 @@ async function sendTranscriptToRobot() {
 
 async function loadHistory() {
   try {
-    const r = await fetch("/history");
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error);
+    const data = await fetchJson("/history");
     data.items.forEach((i) => ensureFont(i.font_family, i.font_url));
     renderHistory(data.items);
   } catch {
@@ -258,9 +277,7 @@ async function upload() {
 
   status.textContent = "Transcribing...";
   try {
-    const r = await fetch("/transcribe", { method: "POST", body: fd });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error);
+    const data = await fetchJson("/transcribe", { method: "POST", body: fd });
 
     ensureFont(data.font_family, data.font_url);
     transcript.textContent = data.text;
@@ -322,4 +339,4 @@ unpairRobotButton.addEventListener("click", unpairRobot);
 sendTranscriptButton.addEventListener("click", sendTranscriptToRobot);
 loadHistory();
 loadRobotState();
-robotPollTimer = window.setInterval(loadRobotState, 8000);
+window.setInterval(loadRobotState, 8000);

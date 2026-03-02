@@ -9,7 +9,7 @@ _LOCAL_MODEL_LOCK = Lock()
 
 
 def normalize_provider(requested_provider: str | None) -> str:
-    provider = (requested_provider or os.getenv("TRANSCRIBE_PROVIDER", "local")).strip().lower()
+    provider = (requested_provider or "local").strip().lower()
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(f"Unsupported provider '{provider}'.")
     return provider

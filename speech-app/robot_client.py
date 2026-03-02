@@ -179,6 +179,28 @@ def normalize_discovered_robot(payload: dict, fallback_host: str) -> dict | None
     }
 
 
+def normalize_candidate_ports(candidate_ports: list[int] | None) -> list[int]:
+    if not candidate_ports:
+        return [DEFAULT_PORT]
+
+    normalized_ports: list[int] = []
+    seen: set[int] = set()
+
+    for port in candidate_ports:
+        try:
+            normalized_port = int(port)
+        except (TypeError, ValueError):
+            continue
+
+        if not 1 <= normalized_port <= 65535 or normalized_port in seen:
+            continue
+
+        normalized_ports.append(normalized_port)
+        seen.add(normalized_port)
+
+    return normalized_ports or [DEFAULT_PORT]
+
+
 def udp_discovery(discovery_port: int) -> list[dict]:
     message = DISCOVERY_MAGIC.encode("utf-8")
     discovered: dict[str, dict] = {}
@@ -258,9 +280,10 @@ def hello_probe(host: str, port: int = DEFAULT_PORT) -> dict | None:
         return None
 
 
-def active_hello_probe() -> list[dict]:
+def active_hello_probe(candidate_ports: list[int] | None = None) -> list[dict]:
     discovered: dict[str, dict] = {}
     candidate_hosts: list[str] = []
+    ports = normalize_candidate_ports(candidate_ports)
 
     for network in probe_networks():
         for host in network.hosts():
@@ -268,8 +291,9 @@ def active_hello_probe() -> list[dict]:
 
     with ThreadPoolExecutor(max_workers=MAX_DISCOVERY_WORKERS) as executor:
         futures = {
-            executor.submit(hello_probe, host): host
+            executor.submit(hello_probe, host, port): (host, port)
             for host in candidate_hosts
+            for port in ports
         }
 
         for future in as_completed(futures):
@@ -284,14 +308,17 @@ def active_hello_probe() -> list[dict]:
     return list(discovered.values())
 
 
-def discover_robots(discovery_port: int = DISCOVERY_PORT) -> list[dict]:
+def discover_robots(
+    discovery_port: int = DISCOVERY_PORT,
+    candidate_ports: list[int] | None = None,
+) -> list[dict]:
     discovered: dict[str, dict] = {}
 
     for robot in udp_discovery(discovery_port):
         discovered[f"{robot['host']}:{robot['port']}"] = robot
 
     if not discovered:
-        for robot in active_hello_probe():
+        for robot in active_hello_probe(candidate_ports):
             discovered[f"{robot['host']}:{robot['port']}"] = robot
 
     return sorted(discovered.values(), key=lambda item: (item["host"], item["port"]))

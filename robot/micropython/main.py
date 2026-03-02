@@ -62,8 +62,21 @@ def connect_wifi():
     raise RuntimeError("Wi-Fi connection failed.")
 
 
+def send_all(client, payload):
+    view = memoryview(payload)
+    total_sent = 0
+
+    while total_sent < len(payload):
+        sent = client.send(view[total_sent:])
+        if sent is None:
+            sent = len(view[total_sent:])
+        if sent <= 0:
+            raise OSError("socket write failed")
+        total_sent += sent
+
+
 def json_response(client, status_code, payload):
-    body = ujson.dumps(payload)
+    body = ujson.dumps(payload).encode()
     reason = "OK" if status_code < 400 else "ERROR"
     headers = [
         "HTTP/1.1 {} {}".format(status_code, reason),
@@ -71,9 +84,9 @@ def json_response(client, status_code, payload):
         "Content-Length: {}".format(len(body)),
         "Connection: close",
         "",
-        body,
+        "",
     ]
-    client.send("\r\n".join(headers).encode())
+    send_all(client, "\r\n".join(headers).encode() + body)
 
 
 def error_response(client, status_code, message):
