@@ -1,8 +1,11 @@
 import os
 from pathlib import Path
+from threading import Lock
 
 
 SUPPORTED_PROVIDERS = {"openai", "local"}
+_LOCAL_MODEL_CACHE = {}
+_LOCAL_MODEL_LOCK = Lock()
 
 
 def normalize_provider(requested_provider: str | None) -> str:
@@ -70,7 +73,7 @@ def transcribe_with_local_whisper(audio_path: Path) -> dict[str, str | float | N
     device = os.getenv("WHISPER_DEVICE", "auto")
     compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
-    model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    model = get_local_whisper_model(WhisperModel, model_name, device, compute_type)
     segments, info = model.transcribe(str(audio_path), vad_filter=True)
     text = " ".join(segment.text.strip() for segment in segments).strip()
 
@@ -81,3 +84,23 @@ def transcribe_with_local_whisper(audio_path: Path) -> dict[str, str | float | N
         "language": getattr(info, "language", None),
         "language_confidence": getattr(info, "language_probability", None),
     }
+
+
+def get_local_whisper_model(
+    whisper_model_cls,
+    model_name: str,
+    device: str,
+    compute_type: str,
+):
+    cache_key = (model_name, device, compute_type)
+    model = _LOCAL_MODEL_CACHE.get(cache_key)
+    if model is not None:
+        return model
+
+    with _LOCAL_MODEL_LOCK:
+        model = _LOCAL_MODEL_CACHE.get(cache_key)
+        if model is None:
+            model = whisper_model_cls(model_name, device=device, compute_type=compute_type)
+            _LOCAL_MODEL_CACHE[cache_key] = model
+
+    return model

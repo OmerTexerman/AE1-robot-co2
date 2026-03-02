@@ -35,6 +35,21 @@ def init_db(db_path: Path | None = None) -> None:
             connection.execute(
                 "ALTER TABLE transcripts ADD COLUMN language TEXT NOT NULL DEFAULT ''"
             )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paired_robot (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                base_url TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                device_name TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                client_name TEXT NOT NULL,
+                pair_token TEXT NOT NULL,
+                paired_at TEXT NOT NULL
+            )
+            """
+        )
         connection.commit()
 
 

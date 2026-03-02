@@ -1,12 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-import fcntl
 import ipaddress
 import json
 import socket
-import struct
 from urllib.parse import urlparse, urlunparse
 
+import psutil
 import requests
 
 
@@ -18,13 +17,6 @@ UDP_DISCOVERY_TIMEOUT_SECONDS = 0.45
 HELLO_PROBE_TIMEOUT_SECONDS = 0.4
 MAX_DISCOVERY_WORKERS = 48
 MAX_SCAN_NETWORKS = 4
-
-SIOCGIFFLAGS = 0x8913
-SIOCGIFADDR = 0x8915
-SIOCGIFBRDADDR = 0x8919
-SIOCGIFNETMASK = 0x891B
-IFF_UP = 0x1
-IFF_LOOPBACK = 0x8
 
 
 class RobotClientError(RuntimeError):
@@ -116,51 +108,36 @@ def send_render_job(config: dict, text: str, font_family: str, script: str) -> d
     )
 
 
-def ifreq_bytes(interface_name: str) -> bytes:
-    return struct.pack("256s", interface_name[:15].encode("utf-8"))
-
-
-def ioctl_ipv4(control_socket: socket.socket, request: int, interface_name: str) -> str | None:
-    try:
-        response = fcntl.ioctl(control_socket.fileno(), request, ifreq_bytes(interface_name))
-    except OSError:
-        return None
-    return socket.inet_ntoa(response[20:24])
-
-
-def ioctl_flags(control_socket: socket.socket, interface_name: str) -> int | None:
-    try:
-        response = fcntl.ioctl(control_socket.fileno(), SIOCGIFFLAGS, ifreq_bytes(interface_name))
-    except OSError:
-        return None
-    return struct.unpack("H", response[16:18])[0]
-
-
 def interface_ipv4_configs() -> list[dict[str, str]]:
     configs: list[dict[str, str]] = []
+    interface_addrs = psutil.net_if_addrs()
+    interface_stats = psutil.net_if_stats()
 
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control_socket:
-        for _index, interface_name in socket.if_nameindex():
-            flags = ioctl_flags(control_socket, interface_name)
-            if flags is None or not (flags & IFF_UP) or (flags & IFF_LOOPBACK):
+    for interface_name, addresses in interface_addrs.items():
+        stats = interface_stats.get(interface_name)
+        if stats is None or not stats.isup:
+            continue
+        if interface_name == "lo":
+            continue
+
+        for address_info in addresses:
+            if address_info.family != socket.AF_INET:
                 continue
 
-            address = ioctl_ipv4(control_socket, SIOCGIFADDR, interface_name)
-            netmask = ioctl_ipv4(control_socket, SIOCGIFNETMASK, interface_name)
+            address = address_info.address
+            netmask = address_info.netmask
             if not address or not netmask:
                 continue
-
             if address.startswith("127.") or address.startswith("169.254."):
                 continue
 
-            broadcast = ioctl_ipv4(control_socket, SIOCGIFBRDADDR, interface_name)
             network = ipaddress.IPv4Interface(f"{address}/{netmask}").network
             configs.append(
                 {
                     "interface": interface_name,
                     "address": address,
                     "netmask": netmask,
-                    "broadcast": broadcast or str(network.broadcast_address),
+                    "broadcast": address_info.broadcast or str(network.broadcast_address),
                 }
             )
 
@@ -181,13 +158,21 @@ def discovery_broadcast_targets() -> list[tuple[str, str]]:
 
 
 def normalize_discovered_robot(payload: dict, fallback_host: str) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+
     host = payload.get("ip_address") or fallback_host
     if not host:
         return None
 
+    try:
+        port = int(payload.get("listen_port", DEFAULT_PORT))
+    except (TypeError, ValueError):
+        return None
+
     return {
         "host": host,
-        "port": int(payload.get("listen_port", DEFAULT_PORT)),
+        "port": port,
         "device_name": payload.get("device_name", "Pico 2 W"),
         "device_id": payload.get("device_id", "unknown"),
         "paired": bool(payload.get("paired")),
@@ -199,27 +184,30 @@ def udp_discovery(discovery_port: int) -> list[dict]:
     discovered: dict[str, dict] = {}
 
     for bind_address, broadcast_address in discovery_broadcast_targets():
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.settimeout(UDP_DISCOVERY_TIMEOUT_SECONDS)
-            sock.bind((bind_address, 0))
-            sock.sendto(message, (broadcast_address, discovery_port))
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.settimeout(UDP_DISCOVERY_TIMEOUT_SECONDS)
+                sock.bind((bind_address, 0))
+                sock.sendto(message, (broadcast_address, discovery_port))
 
-            while True:
-                try:
-                    packet, address = sock.recvfrom(2048)
-                except socket.timeout:
-                    break
+                while True:
+                    try:
+                        packet, address = sock.recvfrom(2048)
+                    except socket.timeout:
+                        break
 
-                try:
-                    payload = json.loads(packet.decode("utf-8"))
-                except ValueError:
-                    continue
+                    try:
+                        payload = json.loads(packet.decode("utf-8"))
+                    except ValueError:
+                        continue
 
-                robot = normalize_discovered_robot(payload, address[0])
-                if robot is None:
-                    continue
-                discovered[f"{robot['host']}:{robot['port']}"] = robot
+                    robot = normalize_discovered_robot(payload, address[0])
+                    if robot is None:
+                        continue
+                    discovered[f"{robot['host']}:{robot['port']}"] = robot
+        except OSError:
+            continue
 
     return list(discovered.values())
 
@@ -264,7 +252,10 @@ def hello_probe(host: str, port: int = DEFAULT_PORT) -> dict | None:
     except ValueError:
         return None
 
-    return normalize_discovered_robot(payload, host)
+    try:
+        return normalize_discovered_robot(payload, host)
+    except (TypeError, ValueError):
+        return None
 
 
 def active_hello_probe() -> list[dict]:
@@ -282,7 +273,10 @@ def active_hello_probe() -> list[dict]:
         }
 
         for future in as_completed(futures):
-            robot = future.result()
+            try:
+                robot = future.result()
+            except Exception:
+                continue
             if robot is None:
                 continue
             discovered[f"{robot['host']}:{robot['port']}"] = robot
