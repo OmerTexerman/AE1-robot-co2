@@ -1,8 +1,9 @@
 version: "3.9"
 
 services:
-  app:
-    build: .
+  speech-app:
+    build:
+      context: ./speech-app
     ports:
       - "8000:8000"
     environment:
@@ -13,8 +14,14 @@ services:
       WHISPER_DEVICE: ${WHISPER_DEVICE:-auto}
       WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
     volumes:
-      - ./data:/app/data
+      - ./speech-app/data:/app/data
       - whisper-cache:/root/.cache/huggingface
+
+  robot:
+    build:
+      context: ./robot
+    profiles:
+      - robot
 
 volumes:
   whisper-cache:

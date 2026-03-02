@@ -1,0 +1,8 @@
+{
+  "name": "robot-dev",
+  "build": {
+    "dockerfile": "../../robot/Dockerfile",
+    "context": "../../robot"
+  },
+  "postCreateCommand": "pip install -r robot/requirements.txt"
+}

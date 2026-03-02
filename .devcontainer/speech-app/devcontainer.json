@@ -1,0 +1,9 @@
+{
+  "name": "speech-app-dev",
+  "build": {
+    "dockerfile": "../../speech-app/Dockerfile",
+    "context": "../../speech-app"
+  },
+  "forwardPorts": [8000],
+  "postCreateCommand": "pip install -r speech-app/requirements.txt"
+}
