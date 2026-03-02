@@ -4,5 +4,10 @@
     "dockerfile": "../../robot/Dockerfile",
     "context": "../../robot"
   },
-  "postCreateCommand": "pip install -r robot/requirements.txt"
+  "runArgs": [
+    "--privileged",
+    "--network=host",
+    "--volume=/dev:/dev"
+  ],
+  "postCreateCommand": "cd robot && pip install -r requirements.txt"
 }

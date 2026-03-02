@@ -4,6 +4,7 @@
     "dockerfile": "../../speech-app/Dockerfile",
     "context": "../../speech-app"
   },
+  "runArgs": ["--network=host"],
   "forwardPorts": [8000],
-  "postCreateCommand": "pip install -r speech-app/requirements.txt"
+  "postCreateCommand": "cd speech-app && pip install -r requirements.txt"
 }

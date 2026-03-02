@@ -23,6 +23,51 @@
 
       <div id="transcript" class="transcript">Your text will appear here.</div>
 
+      <section class="robot-panel">
+        <div class="section-header">
+          <h2>Robot Pairing</h2>
+          <p id="robotConnection" class="robot-connection">No robot paired.</p>
+        </div>
+
+        <div class="pair-grid">
+          <label>
+            Robot IP / Host
+            <input id="robotHostInput" type="text" placeholder="192.168.1.42" />
+          </label>
+
+          <label>
+            Robot Port
+            <input id="robotPortInput" type="number" min="1" max="65535" value="8080" />
+          </label>
+
+          <label>
+            Pairing Code
+            <input id="robotPairingCodeInput" type="text" placeholder="robot pairing code" />
+          </label>
+
+          <label>
+            Client Name
+            <input id="robotClientNameInput" type="text" value="speech-app" />
+          </label>
+        </div>
+
+        <div class="controls">
+          <button id="discoverRobotsButton">Discover Robots on Hotspot</button>
+          <button id="pairRobotButton">Pair Robot</button>
+          <button id="refreshRobotButton">Refresh Status</button>
+          <button id="unpairRobotButton" disabled>Unpair</button>
+          <button id="sendTranscriptButton" disabled>Send Transcript to Robot</button>
+        </div>
+
+        <p id="robotStatus" class="robot-status">
+          Pair the speech app to your Pico 2 W over the laptop hotspot or local network.
+        </p>
+        <div id="robotMeta" class="robot-meta"></div>
+        <div id="discoveredRobots" class="discovered-robots">
+          <p>No robots discovered yet.</p>
+        </div>
+      </section>
+
       <h2>History</h2>
       <div id="historyList" class="history">
         <p>No transcripts yet.</p>

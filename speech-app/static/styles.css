@@ -2,7 +2,7 @@
 
 body {
   font-family: system-ui, sans-serif;
-  max-width: 640px;
+  max-width: 860px;
   margin: 2rem auto;
   padding: 0 1rem;
 }
@@ -15,6 +15,11 @@ body {
 
 button, select {
   padding: 0.5rem 1rem;
+  font: inherit;
+}
+
+input {
+  padding: 0.5rem 0.75rem;
   font: inherit;
 }
 
@@ -39,3 +44,91 @@ button:disabled { opacity: 0.4; }
 }
 
 .history-item small { color: #888; }
+
+.robot-panel {
+  margin-top: 1.5rem;
+  padding: 1rem;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: baseline;
+}
+
+.pair-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.pair-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.95rem;
+}
+
+.robot-connection,
+.robot-status {
+  color: #555;
+}
+
+.robot-meta {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+  font-size: 0.95rem;
+}
+
+.meta-row {
+  color: #333;
+}
+
+.discovered-robots {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.discovered-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  background: white;
+}
+
+.discovered-copy {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.discovered-copy span {
+  color: #666;
+  font-size: 0.92rem;
+}
+
+.use-robot-button {
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .controls {
+    flex-wrap: wrap;
+  }
+
+  .pair-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .discovered-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

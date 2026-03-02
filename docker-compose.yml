@@ -4,8 +4,7 @@ services:
   speech-app:
     build:
       context: ./speech-app
-    ports:
-      - "8000:8000"
+    network_mode: host
     environment:
       TRANSCRIBE_PROVIDER: ${TRANSCRIBE_PROVIDER:-local}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -17,11 +16,19 @@ services:
       - ./speech-app/data:/app/data
       - whisper-cache:/root/.cache/huggingface
 
-  robot:
+  robot-dev:
     build:
       context: ./robot
+    command: sleep infinity
+    stdin_open: true
+    tty: true
+    privileged: true
+    network_mode: host
+    volumes:
+      - ./robot:/workspace/robot
+      - /dev:/dev
     profiles:
-      - robot
+      - robot-dev
 
 volumes:
   whisper-cache:
