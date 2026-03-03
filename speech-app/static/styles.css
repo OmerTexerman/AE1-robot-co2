@@ -41,9 +41,28 @@ button:disabled { opacity: 0.4; }
 .history-item {
   padding: 0.75rem;
   border-bottom: 1px solid #eee;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
 }
 
 .history-item small { color: #888; }
+
+.history-item p {
+  margin: 0.35rem 0 0;
+}
+
+.history-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.history-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
 
 .robot-panel {
   margin-top: 1.5rem;
@@ -125,6 +144,10 @@ button:disabled { opacity: 0.4; }
 
   .pair-grid {
     grid-template-columns: 1fr;
+  }
+
+  .history-item {
+    flex-direction: column;
   }
 
   .discovered-item {

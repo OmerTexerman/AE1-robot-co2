@@ -5,7 +5,6 @@ from robot_client import (
     discover_robots,
     fetch_status,
     pair_robot,
-    send_render_job,
     unpair_robot,
 )
 
@@ -83,14 +82,16 @@ def get_robot_connection_state(logger, config: dict) -> dict:
         return {"connected": False, "status": None, "error": str(exc)}
 
 
-def discover_available_robots(candidate_ports: list[int]) -> list[dict]:
+def discover_available_robots(port: int, current_robot: dict | None = None) -> list[dict]:
+    candidate_ports = [port]
+    if current_robot and current_robot["port"] not in candidate_ports:
+        candidate_ports.append(int(current_robot["port"]))
     return discover_robots(candidate_ports=candidate_ports)
 
 
-def pair_with_robot(host: str, port: int, pairing_code: str, client_name: str) -> tuple[dict, dict]:
+def pair_with_robot(logger, host: str, port: int, pairing_code: str, client_name: str) -> tuple[dict, dict]:
     config = pair_robot(host=host, port=port, pairing_code=pairing_code, client_name=client_name)
-    status = fetch_status(config)
-    return config, status
+    return config, get_robot_connection_state(logger, config)
 
 
 def unpair_current_robot(config: dict) -> str | None:
@@ -99,7 +100,3 @@ def unpair_current_robot(config: dict) -> str | None:
         return None
     except RobotClientError as exc:
         return str(exc)
-
-
-def render_on_robot(config: dict, text: str, font_family: str, script: str) -> dict:
-    return send_render_job(config, text=text, font_family=font_family, script=script)

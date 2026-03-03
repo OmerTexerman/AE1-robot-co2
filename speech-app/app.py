@@ -7,9 +7,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
-from db import init_db, list_transcripts, save_transcript
-from font_selector import build_google_fonts_url, choose_font
-from robot_client import RobotClientError
+from font_selector import choose_font
+from robot_client import RobotClientError, send_render_job
 from robot_service import (
     discover_available_robots,
     get_current_robot,
@@ -17,7 +16,6 @@ from robot_service import (
     init_robot_session,
     paired_robot_payload,
     pair_with_robot,
-    render_on_robot,
     set_current_robot,
     unpaired_robot_payload,
     unpair_current_robot,
@@ -29,7 +27,6 @@ load_dotenv()
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
 init_robot_session(app)
-init_db()
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -40,14 +37,6 @@ logging.basicConfig(
 @app.get("/")
 def index():
     return render_template("index.html")
-
-
-@app.get("/history")
-def history():
-    items = list_transcripts()
-    for item in items:
-        item["font_url"] = build_google_fonts_url(item["font_family"])
-    return jsonify({"items": items})
 
 
 def request_payload() -> dict:
@@ -70,19 +59,8 @@ def parse_port(value: object, error_message: str, default: int = 8080) -> int:
     return port
 
 
-def parse_candidate_ports(raw_ports: object) -> list[int]:
-    if raw_ports is None:
-        return []
-    if not isinstance(raw_ports, list):
-        raise ValueError("Robot discovery ports must be a list.")
-
-    candidate_ports: list[int] = []
-    for raw_port in raw_ports:
-        port = parse_port(raw_port, f"Invalid robot discovery port '{raw_port}'.")
-        if port not in candidate_ports:
-            candidate_ports.append(port)
-
-    return candidate_ports
+def parse_discovery_port(payload: dict) -> int:
+    return parse_port(payload.get("port"), "Robot discovery port must be a number.")
 
 
 def parse_pairing_request(payload: dict) -> tuple[str, int, str, str]:
@@ -121,10 +99,8 @@ def build_transcription_response(
     transcription: dict,
     font: dict[str, str],
     created_at: str,
-    transcript_id: int,
 ) -> dict:
     return {
-        "id": transcript_id,
         "text": transcription["text"],
         "script": font["script"],
         "font_family": font["font_family"],
@@ -149,25 +125,22 @@ def robot_state():
 @app.post("/robot/discover")
 def robot_discover():
     try:
-        candidate_ports = parse_candidate_ports(request_payload().get("ports", []))
+        discovery_port = parse_discovery_port(request_payload())
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
     current_robot = get_current_robot(app)
-    if current_robot and current_robot["port"] not in candidate_ports:
-        candidate_ports.append(int(current_robot["port"]))
-
     try:
-        robots = discover_available_robots(candidate_ports)
+        robots = discover_available_robots(discovery_port, current_robot)
     except OSError as exc:
         app.logger.exception("robot_discover failed: %s", exc)
         return (
             jsonify(
                 {
-                    "error": (
+                        "error": (
                         "Robot discovery failed. If the speech app is in Docker, run it with host "
-                        f"networking for hotspot discovery. {exc}"
-                    )
+                        f"networking for local-network discovery. {exc}"
+                        )
                 }
             ),
             502,
@@ -186,7 +159,7 @@ def robot_pair():
 
     app.logger.info("robot_pair requested host=%s port=%s client_name=%s", host, port, client_name)
     try:
-        config, status = pair_with_robot(host, port, pairing_code, client_name)
+        config, connection_state = pair_with_robot(app.logger, host, port, pairing_code, client_name)
     except RobotClientError as exc:
         app.logger.warning("robot_pair failed host=%s port=%s error=%s", host, port, exc)
         return jsonify({"error": str(exc)}), 502
@@ -200,7 +173,7 @@ def robot_pair():
         config["port"],
         config["client_name"],
     )
-    return jsonify(paired_robot_payload(config, connected=True, status=status))
+    return jsonify(paired_robot_payload(config, **connection_state))
 
 
 @app.post("/robot/unpair")
@@ -251,7 +224,7 @@ def robot_render():
         script,
     )
     try:
-        result = render_on_robot(config, text, font_family, script)
+        result = send_render_job(config, text=text, font_family=font_family, script=script)
     except RobotClientError as exc:
         app.logger.warning(
             "robot_render failed device=%s host=%s port=%s error=%s",
@@ -307,17 +280,8 @@ def transcribe():
     language = str(transcription.get("language") or "")
     font = choose_font(text, language)
     created_at = datetime.now(timezone.utc).isoformat()
-    transcript_id = save_transcript(
-        text=text,
-        script=font["script"],
-        font_family=font["font_family"],
-        provider=transcription["provider"],
-        language=language,
-        created_at=created_at,
-    )
     app.logger.info(
-        "transcribe completed transcript_id=%s provider=%s chars=%s script=%s font=%s language=%s",
-        transcript_id,
+        "transcribe completed provider=%s chars=%s script=%s font=%s language=%s",
         transcription["provider"],
         len(text),
         font["script"],
@@ -326,7 +290,7 @@ def transcribe():
     )
 
     return jsonify(
-        build_transcription_response(transcription, font, created_at, transcript_id)
+        build_transcription_response(transcription, font, created_at)
     )
 
 

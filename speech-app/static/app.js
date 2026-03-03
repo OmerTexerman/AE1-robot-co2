@@ -18,12 +18,20 @@ const robotStatus = document.getElementById("robotStatus");
 const robotMeta = document.getElementById("robotMeta");
 const discoveredRobots = document.getElementById("discoveredRobots");
 
+const DEFAULT_TRANSCRIPT_TEXT = "Your text will appear here.";
+const HISTORY_STORAGE_KEY = "speechAppTranscriptHistory";
+const HISTORY_LIMIT = 12;
+
 let mediaRecorder;
 let audioChunks = [];
 let recordedMimeType = "audio/webm";
 let currentTranscript = null;
+let transcriptHistory = [];
 let pairedRobot = null;
-let discoveredRobotItems = [];
+let robotConnected = false;
+let activeRobotAction = null;
+let robotPollTimer = null;
+let robotStateRequestInFlight = false;
 
 function escapeHtml(s) {
   const d = document.createElement("div");
@@ -60,12 +68,117 @@ async function fetchJson(url, options) {
   return payload;
 }
 
-function currentCandidatePorts() {
+function currentRobotPort() {
   const port = Number(robotPortInput.value || 8080);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return 8080;
+  }
+  return port;
+}
+
+function historyItemId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizeHistoryItem(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+
+  const text = typeof item.text === "string" ? item.text.trim() : "";
+  if (!text) {
+    return null;
+  }
+
+  return {
+    id: typeof item.id === "string" && item.id ? item.id : historyItemId(),
+    text,
+    script: typeof item.script === "string" && item.script ? item.script : "latin",
+    font_family: typeof item.font_family === "string" && item.font_family ? item.font_family : "Noto Sans",
+    font_url: typeof item.font_url === "string" ? item.font_url : "",
+    provider: typeof item.provider === "string" && item.provider ? item.provider : "unknown",
+    language: typeof item.language === "string" ? item.language : "",
+    language_confidence: item.language_confidence ?? null,
+    created_at: typeof item.created_at === "string" && item.created_at ? item.created_at : new Date().toISOString(),
+  };
+}
+
+function loadTranscriptHistory() {
+  try {
+    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+
+    const items = JSON.parse(raw);
+    if (!Array.isArray(items)) {
+      return [];
+    }
+
+    return items.map(normalizeHistoryItem).filter(Boolean).slice(0, HISTORY_LIMIT);
+  } catch {
     return [];
   }
-  return [port];
+}
+
+function persistTranscriptHistory() {
+  try {
+    window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(transcriptHistory.slice(0, HISTORY_LIMIT)));
+  } catch {
+    status.textContent = "Unable to save transcript history in this browser.";
+  }
+}
+
+function updateHistoryActionButtons() {
+  const disableSend = activeRobotAction !== null || robotStateRequestInFlight || !pairedRobot || !robotConnected;
+  historyList.querySelectorAll(".history-send-button").forEach((button) => {
+    button.disabled = disableSend;
+  });
+}
+
+function setCurrentTranscript(item) {
+  ensureFont(item.font_family, item.font_url);
+  currentTranscript = item;
+  transcript.textContent = item.text;
+  transcript.style.fontFamily = `"${item.font_family}", sans-serif`;
+  syncRobotControls();
+}
+
+function clearCurrentTranscript() {
+  currentTranscript = null;
+  transcript.textContent = DEFAULT_TRANSCRIPT_TEXT;
+  transcript.style.fontFamily = "";
+  syncRobotControls();
+}
+
+function addTranscriptToHistory(item) {
+  const historyItem = normalizeHistoryItem({ ...item, id: historyItemId() });
+  if (!historyItem) {
+    return null;
+  }
+
+  transcriptHistory = [historyItem, ...transcriptHistory].slice(0, HISTORY_LIMIT);
+  persistTranscriptHistory();
+  renderHistory(transcriptHistory);
+  return historyItem;
+}
+
+function deleteTranscriptFromHistory(id) {
+  if (currentTranscript?.id === id) {
+    clearCurrentTranscript();
+  }
+
+  transcriptHistory = transcriptHistory.filter((item) => item.id !== id);
+  persistTranscriptHistory();
+  renderHistory(transcriptHistory);
+}
+
+function findTranscriptInHistory(id) {
+  return transcriptHistory.find((item) => item.id === id) || null;
 }
 
 function renderHistory(items) {
@@ -73,25 +186,72 @@ function renderHistory(items) {
     historyList.innerHTML = "<p>No transcripts yet.</p>";
     return;
   }
+
+  const disableSend = activeRobotAction !== null || robotStateRequestInFlight || !pairedRobot || !robotConnected;
   historyList.innerHTML = items
     .map(
-      (i) => `<div class="history-item">
-        <small>${escapeHtml(i.provider)} &middot; ${escapeHtml(i.language || i.script)} &middot; ${escapeHtml(new Date(i.created_at).toLocaleString())}</small>
-        <p style="font-family:'${escapeHtml(i.font_family)}',sans-serif">${escapeHtml(i.text)}</p>
+      (i) => `<div class="history-item" data-history-id="${escapeHtml(i.id)}">
+        <div class="history-copy">
+          <small>${escapeHtml(i.provider)} &middot; ${escapeHtml(i.language || i.script)} &middot; ${escapeHtml(new Date(i.created_at).toLocaleString())}</small>
+          <p style="font-family:'${escapeHtml(i.font_family)}',sans-serif">${escapeHtml(i.text)}</p>
+        </div>
+        <div class="history-actions">
+          <button type="button" class="history-send-button" data-history-id="${escapeHtml(i.id)}" ${disableSend ? "disabled" : ""}>Send to Robot</button>
+          <button type="button" class="history-delete-button" data-history-id="${escapeHtml(i.id)}">Delete</button>
+        </div>
       </div>`
     )
     .join("");
+
+  updateHistoryActionButtons();
 }
 
-function renderRobotState(payload) {
+function syncRobotControls() {
+  const robotBusy = activeRobotAction !== null || robotStateRequestInFlight;
+  const canPair = !robotBusy;
+  const canRefresh = !robotBusy;
+  const canUnpair = !robotBusy && Boolean(pairedRobot);
+  const canSendTranscript = !robotBusy && Boolean(pairedRobot) && robotConnected && Boolean(currentTranscript);
+
+  discoverRobotsButton.disabled = robotBusy;
+  pairRobotButton.disabled = !canPair;
+  refreshRobotButton.disabled = !canRefresh;
+  unpairRobotButton.disabled = !canUnpair;
+  sendTranscriptButton.disabled = !canSendTranscript;
+  updateHistoryActionButtons();
+}
+
+function stopRobotPolling() {
+  if (robotPollTimer !== null) {
+    window.clearTimeout(robotPollTimer);
+    robotPollTimer = null;
+  }
+}
+
+function scheduleRobotPoll() {
+  stopRobotPolling();
+  if (!pairedRobot || document.hidden) {
+    return;
+  }
+
+  robotPollTimer = window.setTimeout(() => {
+    loadRobotState({ silent: true });
+  }, 8000);
+}
+
+function renderRobotState(payload, options = {}) {
+  const { preserveStatus = false } = options;
   pairedRobot = payload.paired ? payload.robot : null;
+  robotConnected = Boolean(payload.paired && payload.robot && payload.connected);
 
   if (!payload.paired || !payload.robot) {
     robotConnection.textContent = "No robot paired.";
-    robotStatus.textContent = "Pair the speech app to your Pico 2 W over the laptop hotspot or local network.";
+    if (!preserveStatus) {
+      robotStatus.textContent = "Pair the speech app to your Pico 2 W over the current local network.";
+    }
     robotMeta.innerHTML = "";
-    unpairRobotButton.disabled = true;
-    sendTranscriptButton.disabled = true;
+    syncRobotControls();
+    stopRobotPolling();
     return;
   }
 
@@ -99,31 +259,20 @@ function renderRobotState(payload) {
   robotPortInput.value = payload.robot.port;
   robotClientNameInput.value = payload.robot.client_name;
   robotConnection.textContent = payload.connected ? "Robot connected." : "Robot paired, but currently unreachable.";
-  robotStatus.textContent = payload.error || (payload.status ? "Robot status is live." : "Robot is paired.");
+  if (!preserveStatus) {
+    robotStatus.textContent = payload.error || (payload.status ? "Robot status is live." : "Robot is paired.");
+  }
   robotMeta.innerHTML = `
     <div class="meta-row"><strong>Device:</strong> ${escapeHtml(payload.robot.device_name)}</div>
     <div class="meta-row"><strong>ID:</strong> ${escapeHtml(payload.robot.device_id)}</div>
     <div class="meta-row"><strong>Endpoint:</strong> ${escapeHtml(payload.robot.base_url)}</div>
     <div class="meta-row"><strong>Paired:</strong> ${escapeHtml(new Date(payload.robot.paired_at).toLocaleString())}</div>
   `;
-  unpairRobotButton.disabled = false;
-  sendTranscriptButton.disabled = !payload.connected || !currentTranscript;
-}
-
-function useDiscoveredRobot(index) {
-  const robot = discoveredRobotItems[index];
-  if (!robot) {
-    return;
-  }
-
-  robotHostInput.value = robot.host;
-  robotPortInput.value = robot.port;
-  robotStatus.textContent = `Loaded ${robot.device_name}. Enter the pairing code to complete pairing.`;
+  syncRobotControls();
+  scheduleRobotPoll();
 }
 
 function renderDiscoveredRobots(items) {
-  discoveredRobotItems = items;
-
   if (!items.length) {
     discoveredRobots.innerHTML = "<p>No robots discovered yet.</p>";
     return;
@@ -131,60 +280,89 @@ function renderDiscoveredRobots(items) {
 
   discoveredRobots.innerHTML = items
     .map(
-      (item, index) => `
+      (item) => `
         <div class="discovered-item">
           <div class="discovered-copy">
             <strong>${escapeHtml(item.device_name)}</strong>
             <span>${escapeHtml(item.host)}:${escapeHtml(String(item.port))}</span>
           </div>
-          <button type="button" class="use-robot-button" data-robot-index="${index}">
+          <button
+            type="button"
+            class="use-robot-button"
+            data-robot-host="${escapeHtml(item.host)}"
+            data-robot-port="${escapeHtml(String(item.port))}"
+            data-robot-name="${escapeHtml(item.device_name)}"
+          >
             Use This Robot
           </button>
         </div>
       `
     )
     .join("");
-
-  document.querySelectorAll(".use-robot-button").forEach((button) => {
-    button.addEventListener("click", () => useDiscoveredRobot(Number(button.dataset.robotIndex)));
-  });
 }
 
-async function loadRobotState() {
+async function loadRobotState(options = {}) {
+  const { silent = false } = options;
+  if (robotStateRequestInFlight) {
+    return;
+  }
+
+  robotStateRequestInFlight = true;
+  syncRobotControls();
   try {
     const payload = await fetchJson("/robot");
-    renderRobotState(payload);
+    renderRobotState(payload, { preserveStatus: silent });
   } catch (error) {
     robotConnection.textContent = "Robot status unavailable.";
-    robotStatus.textContent = error.message || "Unable to load robot state.";
+    robotConnected = false;
+    if (!silent) {
+      robotStatus.textContent = error.message || "Unable to load robot state.";
+    }
+    syncRobotControls();
+  } finally {
+    robotStateRequestInFlight = false;
+    syncRobotControls();
+    if (pairedRobot) {
+      scheduleRobotPoll();
+    }
   }
 }
 
+function loadHistory() {
+  transcriptHistory = loadTranscriptHistory();
+  persistTranscriptHistory();
+  transcriptHistory.forEach((item) => ensureFont(item.font_family, item.font_url));
+  renderHistory(transcriptHistory);
+}
+
 async function discoverRobots() {
-  robotStatus.textContent = "Scanning the laptop hotspot for Pico robots...";
-  discoverRobotsButton.disabled = true;
+  robotStatus.textContent = "Scanning the current local network for Pico robots...";
+  activeRobotAction = "discover";
+  syncRobotControls();
 
   try {
     const payload = await fetchJson("/robot/discover", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ports: currentCandidatePorts() }),
+      body: JSON.stringify({ port: currentRobotPort() }),
     });
 
     renderDiscoveredRobots(payload.items);
     robotStatus.textContent = payload.items.length
       ? "Discovery complete. Pick a robot and pair it."
-      : "No robots replied. Check that the Pico joined the laptop hotspot.";
+      : "No robots replied. Check that the Pico joined the same local network.";
   } catch (error) {
     robotStatus.textContent = error.message || "Robot discovery failed.";
   } finally {
-    discoverRobotsButton.disabled = false;
+    activeRobotAction = null;
+    syncRobotControls();
   }
 }
 
 async function pairRobot() {
   robotStatus.textContent = "Pairing with robot...";
-  pairRobotButton.disabled = true;
+  activeRobotAction = "pair";
+  syncRobotControls();
 
   try {
     const payload = await fetchJson("/robot/pair", {
@@ -200,17 +378,19 @@ async function pairRobot() {
 
     robotPairingCodeInput.value = "";
     renderRobotState(payload);
-    robotStatus.textContent = "Pairing complete.";
+    robotStatus.textContent = payload.connected ? "Pairing complete." : (payload.error || "Pairing saved, but the robot is currently unreachable.");
   } catch (error) {
     robotStatus.textContent = error.message || "Pairing failed.";
   } finally {
-    pairRobotButton.disabled = false;
+    activeRobotAction = null;
+    syncRobotControls();
   }
 }
 
 async function unpairRobot() {
   robotStatus.textContent = "Removing robot pairing...";
-  unpairRobotButton.disabled = true;
+  activeRobotAction = "unpair";
+  syncRobotControls();
 
   try {
     const payload = await fetchJson("/robot/unpair", { method: "POST" });
@@ -219,27 +399,33 @@ async function unpairRobot() {
   } catch (error) {
     robotStatus.textContent = error.message || "Unpair failed.";
   } finally {
-    unpairRobotButton.disabled = !pairedRobot;
+    activeRobotAction = null;
+    syncRobotControls();
   }
 }
 
-async function sendTranscriptToRobot() {
-  if (!currentTranscript) {
+async function sendTranscriptPayloadToRobot(transcriptToSend) {
+  if (!transcriptToSend) {
     robotStatus.textContent = "Record and transcribe something first.";
+    return;
+  }
+  if (!pairedRobot || !robotConnected) {
+    robotStatus.textContent = "Pair with a reachable robot first.";
     return;
   }
 
   robotStatus.textContent = "Sending transcript to robot...";
-  sendTranscriptButton.disabled = true;
+  activeRobotAction = "render";
+  syncRobotControls();
 
   try {
     const payload = await fetchJson("/robot/render", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        text: currentTranscript.text,
-        font_family: currentTranscript.font_family,
-        script: currentTranscript.script,
+        text: transcriptToSend.text,
+        font_family: transcriptToSend.font_family,
+        script: transcriptToSend.script,
       }),
     });
 
@@ -247,18 +433,13 @@ async function sendTranscriptToRobot() {
   } catch (error) {
     robotStatus.textContent = error.message || "Unable to send transcript.";
   } finally {
-    sendTranscriptButton.disabled = !(pairedRobot && currentTranscript);
+    activeRobotAction = null;
+    syncRobotControls();
   }
 }
 
-async function loadHistory() {
-  try {
-    const data = await fetchJson("/history");
-    data.items.forEach((i) => ensureFont(i.font_family, i.font_url));
-    renderHistory(data.items);
-  } catch {
-    historyList.innerHTML = "<p>Unable to load history.</p>";
-  }
+async function sendTranscriptToRobot() {
+  await sendTranscriptPayloadToRobot(currentTranscript);
 }
 
 function ext(mime) {
@@ -278,19 +459,17 @@ async function upload() {
   status.textContent = "Transcribing...";
   try {
     const data = await fetchJson("/transcribe", { method: "POST", body: fd });
-
-    ensureFont(data.font_family, data.font_url);
-    transcript.textContent = data.text;
-    transcript.style.fontFamily = `"${data.font_family}", sans-serif`;
-    currentTranscript = data;
+    const historyItem = addTranscriptToHistory(data);
+    if (!historyItem) {
+      throw new Error("Transcription returned invalid data.");
+    }
+    setCurrentTranscript(historyItem);
     status.textContent = "Done.";
-    sendTranscriptButton.disabled = !pairedRobot;
-    await loadHistory();
   } catch (e) {
     transcript.textContent = "Transcription failed.";
     status.textContent = e.message;
     currentTranscript = null;
-    sendTranscriptButton.disabled = true;
+    syncRobotControls();
   } finally {
     recordButton.disabled = false;
     providerSelect.disabled = false;
@@ -330,6 +509,48 @@ function stopRecording() {
   }
 }
 
+historyList.addEventListener("click", (event) => {
+  const sendButton = event.target.closest(".history-send-button");
+  if (sendButton) {
+    const historyItem = findTranscriptInHistory(sendButton.dataset.historyId || "");
+    if (!historyItem) {
+      return;
+    }
+
+    sendTranscriptPayloadToRobot(historyItem);
+    return;
+  }
+
+  const deleteButton = event.target.closest(".history-delete-button");
+  if (!deleteButton) {
+    return;
+  }
+
+  deleteTranscriptFromHistory(deleteButton.dataset.historyId || "");
+});
+
+discoveredRobots.addEventListener("click", (event) => {
+  const button = event.target.closest(".use-robot-button");
+  if (!button) {
+    return;
+  }
+
+  robotHostInput.value = button.dataset.robotHost || "";
+  robotPortInput.value = button.dataset.robotPort || "8080";
+  robotStatus.textContent = `Loaded ${button.dataset.robotName || "robot"}. Enter the pairing code to complete pairing.`;
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopRobotPolling();
+    return;
+  }
+
+  if (pairedRobot) {
+    loadRobotState({ silent: true });
+  }
+});
+
 recordButton.addEventListener("click", startRecording);
 stopButton.addEventListener("click", stopRecording);
 pairRobotButton.addEventListener("click", pairRobot);
@@ -339,4 +560,3 @@ unpairRobotButton.addEventListener("click", unpairRobot);
 sendTranscriptButton.addEventListener("click", sendTranscriptToRobot);
 loadHistory();
 loadRobotState();
-window.setInterval(loadRobotState, 8000);
