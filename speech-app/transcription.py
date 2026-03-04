@@ -6,6 +6,8 @@ from threading import Lock
 SUPPORTED_PROVIDERS = {"openai", "local"}
 _LOCAL_MODEL_CACHE = {}
 _LOCAL_MODEL_LOCK = Lock()
+_OPENAI_CLIENT_CACHE = {}
+_OPENAI_CLIENT_LOCK = Lock()
 
 
 def normalize_provider(requested_provider: str | None) -> str:
@@ -16,18 +18,31 @@ def normalize_provider(requested_provider: str | None) -> str:
 
 
 def transcribe_audio(audio_path: Path, provider: str) -> dict[str, str | float | None]:
-    normalized_provider = normalize_provider(provider)
-    if normalized_provider == "openai":
+    if provider == "openai":
         transcription = transcribe_with_openai(audio_path)
     else:
         transcription = transcribe_with_local_whisper(audio_path)
 
     return {
-        "provider": normalized_provider,
+        "provider": provider,
         "text": str(transcription["text"]).strip(),
         "language": transcription.get("language") or "",
         "language_confidence": transcription.get("language_confidence"),
     }
+
+
+def _get_openai_client(openai_cls, api_key: str):
+    client = _OPENAI_CLIENT_CACHE.get(api_key)
+    if client is not None:
+        return client
+
+    with _OPENAI_CLIENT_LOCK:
+        client = _OPENAI_CLIENT_CACHE.get(api_key)
+        if client is None:
+            client = openai_cls(api_key=api_key)
+            _OPENAI_CLIENT_CACHE[api_key] = client
+
+    return client
 
 
 def transcribe_with_openai(audio_path: Path) -> dict[str, str | float | None]:
@@ -43,7 +58,7 @@ def transcribe_with_openai(audio_path: Path) -> dict[str, str | float | None]:
         raise RuntimeError("OPENAI_API_KEY is not set.")
 
     model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
-    client = OpenAI(api_key=api_key)
+    client = _get_openai_client(OpenAI, api_key)
 
     with audio_path.open("rb") as audio_file:
         transcription = client.audio.transcriptions.create(
@@ -52,8 +67,6 @@ def transcribe_with_openai(audio_path: Path) -> dict[str, str | float | None]:
         )
 
     text = getattr(transcription, "text", "").strip()
-    if not text:
-        raise RuntimeError("The OpenAI transcription service returned empty text.")
     return {
         "text": text,
         "language": getattr(transcription, "language", None),
@@ -77,8 +90,6 @@ def transcribe_with_local_whisper(audio_path: Path) -> dict[str, str | float | N
     segments, info = model.transcribe(str(audio_path), vad_filter=True)
     text = " ".join(segment.text.strip() for segment in segments).strip()
 
-    if not text:
-        raise RuntimeError("The local Whisper model returned empty text.")
     return {
         "text": text,
         "language": getattr(info, "language", None),

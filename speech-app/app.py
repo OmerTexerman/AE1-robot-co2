@@ -1,14 +1,16 @@
-import tempfile
-from datetime import datetime, timezone
 import logging
 import os
+import tempfile
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 from font_selector import choose_font
-from robot_client import RobotClientError, send_render_job
+from google_fonts import DEFAULT_FONT_FAMILY, get_fonts_for_subset, warm_cache
+from robot_client import DEFAULT_PORT, RobotClientError, send_render_job
 from robot_service import (
     discover_available_robots,
     get_current_robot,
@@ -44,7 +46,7 @@ def request_payload() -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def parse_port(value: object, error_message: str, default: int = 8080) -> int:
+def parse_port(value: object, error_message: str, default: int = DEFAULT_PORT) -> int:
     if value in (None, ""):
         return default
 
@@ -79,7 +81,7 @@ def parse_pairing_request(payload: dict) -> tuple[str, int, str, str]:
 
 def parse_render_request(payload: dict) -> tuple[str, str, str]:
     text = str(payload.get("text", "")).strip()
-    font_family = str(payload.get("font_family", "")).strip() or "Noto Sans"
+    font_family = str(payload.get("font_family", "")).strip() or DEFAULT_FONT_FAMILY
     script = str(payload.get("script", "")).strip() or "latin"
 
     if not text:
@@ -245,6 +247,15 @@ def robot_render():
     return jsonify(result)
 
 
+@app.get("/fonts")
+def fonts():
+    subset = request.args.get("subset", "").strip()
+    if not subset:
+        return jsonify({"error": "subset query parameter is required."}), 400
+
+    return jsonify({"subset": subset, "fonts": get_fonts_for_subset(subset)})
+
+
 @app.post("/transcribe")
 def transcribe():
     audio = request.files.get("audio")
@@ -275,10 +286,10 @@ def transcribe():
 
     text = transcription["text"]
     if not text:
-        return jsonify({"error": "The transcription service returned empty text."}), 500
+        return jsonify({"error": "No speech detected. Please try again."}), 422
 
     language = str(transcription.get("language") or "")
-    font = choose_font(text, language)
+    font = choose_font(text)
     created_at = datetime.now(timezone.utc).isoformat()
     app.logger.info(
         "transcribe completed provider=%s chars=%s script=%s font=%s language=%s",
@@ -297,4 +308,5 @@ def transcribe():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     debug = os.getenv("FLASK_DEBUG", "").strip() == "1"
+    threading.Thread(target=warm_cache, daemon=True).start()
     app.run(debug=debug, use_reloader=debug, host="0.0.0.0", port=port)

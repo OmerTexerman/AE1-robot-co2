@@ -11,6 +11,7 @@ _cache_lock = threading.Lock()
 _cached_fonts: list[dict] | None = None
 _cache_timestamp: float = 0
 _CACHE_TTL = 24 * 60 * 60  # 24 hours
+DEFAULT_FONT_FAMILY = "Noto Sans"
 
 
 def _fetch_fonts() -> list[dict]:
@@ -38,14 +39,16 @@ def _get_cached_fonts() -> list[dict]:
     with _cache_lock:
         if _cached_fonts is not None and (time.monotonic() - _cache_timestamp) < _CACHE_TTL:
             return _cached_fonts
+        stale = _cached_fonts
 
-        # Hold lock across fetch to prevent thundering herd
-        try:
-            fonts = _fetch_fonts()
-        except Exception:
-            logger.exception("Failed to fetch Google Fonts")
-            return _cached_fonts if _cached_fonts is not None else []
+    # Fetch outside the lock to avoid blocking concurrent requests for up to 15s
+    try:
+        fonts = _fetch_fonts()
+    except Exception:
+        logger.exception("Failed to fetch Google Fonts")
+        return stale if stale is not None else []
 
+    with _cache_lock:
         _cached_fonts = fonts
         _cache_timestamp = time.monotonic()
 
@@ -65,18 +68,17 @@ def get_fonts_for_subset(subset: str, limit: int = 40) -> list[dict]:
 
 def get_default_font(subset: str) -> str:
     fonts = _get_cached_fonts()
+    first_match = None
 
-    # Prefer first Noto Sans variant for the subset
     for font in fonts:
-        if subset in font.get("subsets", []) and font["family"].startswith("Noto Sans"):
+        if subset not in font.get("subsets", []):
+            continue
+        if font["family"].startswith("Noto Sans"):
             return font["family"]
+        if first_match is None:
+            first_match = font["family"]
 
-    # Fall back to most popular font for the subset (list is sorted by popularity)
-    for font in fonts:
-        if subset in font.get("subsets", []):
-            return font["family"]
-
-    return "Noto Sans"
+    return first_match or DEFAULT_FONT_FAMILY
 
 
 def warm_cache() -> None:

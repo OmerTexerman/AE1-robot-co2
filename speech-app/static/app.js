@@ -18,18 +18,30 @@ const robotStatus = document.getElementById("robotStatus");
 const robotMeta = document.getElementById("robotMeta");
 const discoveredRobots = document.getElementById("discoveredRobots");
 
+const transcriptFontTrigger = document.getElementById("transcriptFontTrigger");
+const transcriptSizePicker = document.getElementById("transcriptSizePicker");
+const fontPickerPanel = document.getElementById("fontPickerPanel");
+const fontPickerSearch = document.getElementById("fontPickerSearch");
+const fontPickerList = document.getElementById("fontPickerList");
+
 const DEFAULT_TRANSCRIPT_TEXT = "Your text will appear here.";
 const HISTORY_STORAGE_KEY = "speechAppTranscriptHistory";
 const HISTORY_LIMIT = 12;
+const FONT_SIZES = [14, 16, 18, 20, 24, 28, 32, 40];
+const DEFAULT_FONT_SIZE = 20;
+const DEFAULT_FONT_FAMILY = "Noto Sans";
+const DEFAULT_ROBOT_PORT = 8080;
 
 let mediaRecorder;
 let audioChunks = [];
 let recordedMimeType = "audio/webm";
-let currentTranscript = null;
+let currentTranscriptId = null;
 let transcriptHistory = [];
 let pairedRobot = null;
 let robotConnected = false;
 let activeRobotAction = null;
+const fontCache = {};
+let activeFontPicker = null; // { triggerEl, subset, currentFamily, onSelect }
 let robotPollTimer = null;
 let robotStateRequestInFlight = false;
 let robotStateMutationVersion = 0;
@@ -40,13 +52,34 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+const loadedFonts = new Set();
+
 function ensureFont(family, url) {
-  if (!url || document.querySelector(`link[data-font="${family}"]`)) return;
+  if (!url || loadedFonts.has(family)) return;
+  loadedFonts.add(family);
   const link = document.createElement("link");
   link.rel = "stylesheet";
   link.href = url;
-  link.dataset.font = family;
   document.head.appendChild(link);
+}
+
+function cssFontFamily(family) {
+  return `"${family}", sans-serif`;
+}
+
+function buildGoogleFontsUrl(family) {
+  return `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family)}:wght@400;500;700&display=swap`;
+}
+
+async function getFontsForSubset(subset) {
+  if (fontCache[subset]) return fontCache[subset];
+  try {
+    const data = await fetchJson(`/fonts?subset=${encodeURIComponent(subset)}`);
+    fontCache[subset] = data.fonts || [];
+  } catch {
+    fontCache[subset] = [];
+  }
+  return fontCache[subset];
 }
 
 async function fetchJson(url, options) {
@@ -70,9 +103,9 @@ async function fetchJson(url, options) {
 }
 
 function currentRobotPort() {
-  const port = Number(robotPortInput.value || 8080);
+  const port = Number(robotPortInput.value || DEFAULT_ROBOT_PORT);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    return 8080;
+    return DEFAULT_ROBOT_PORT;
   }
   return port;
 }
@@ -95,12 +128,14 @@ function normalizeHistoryItem(item) {
     return null;
   }
 
+  const fs = Number(item.font_size);
   return {
     id: typeof item.id === "string" && item.id ? item.id : historyItemId(),
     text,
     script: typeof item.script === "string" && item.script ? item.script : "latin",
-    font_family: typeof item.font_family === "string" && item.font_family ? item.font_family : "Noto Sans",
+    font_family: typeof item.font_family === "string" && item.font_family ? item.font_family : DEFAULT_FONT_FAMILY,
     font_url: typeof item.font_url === "string" ? item.font_url : "",
+    font_size: FONT_SIZES.includes(fs) ? fs : DEFAULT_FONT_SIZE,
     provider: typeof item.provider === "string" && item.provider ? item.provider : "unknown",
     language: typeof item.language === "string" ? item.language : "",
     language_confidence: item.language_confidence ?? null,
@@ -141,18 +176,128 @@ function updateHistoryActionButtons() {
   });
 }
 
+function closeFontPicker() {
+  fontPickerPanel.classList.remove("open");
+  activeFontPicker = null;
+}
+
+function renderFontList(fonts, selectedFamily) {
+  if (!fonts.length) {
+    fontPickerList.innerHTML = '<div class="font-picker-empty">No fonts found</div>';
+    return;
+  }
+  fontPickerList.innerHTML = fonts
+    .map(
+      (f) =>
+        `<div class="font-picker-item${f.family === selectedFamily ? " selected" : ""}" data-family="${escapeHtml(f.family)}">${escapeHtml(f.family)}</div>`
+    )
+    .join("");
+}
+
+async function openFontPicker(triggerEl, subset, currentFamily, onSelect) {
+  if (activeFontPicker && activeFontPicker.triggerEl === triggerEl) {
+    closeFontPicker();
+    return;
+  }
+
+  activeFontPicker = { triggerEl, subset, currentFamily, onSelect };
+  fontPickerSearch.value = "";
+  fontPickerList.innerHTML = '<div class="font-picker-empty">Loading...</div>';
+  fontPickerPanel.classList.add("open");
+
+  // position near the trigger
+  const rect = triggerEl.getBoundingClientRect();
+  fontPickerPanel.style.top = (rect.bottom + window.scrollY + 4) + "px";
+  fontPickerPanel.style.left = rect.left + "px";
+
+  fontPickerSearch.focus();
+
+  const cached = await getFontsForSubset(subset);
+  const fonts = [...cached];
+  // Ensure current font is in the list without mutating cache
+  if (currentFamily && !fonts.some((f) => f.family === currentFamily)) {
+    fonts.unshift({ family: currentFamily, category: "" });
+  }
+  activeFontPicker.allFonts = fonts;
+  renderFontList(fonts, currentFamily);
+}
+
+function filterFontList() {
+  if (!activeFontPicker?.allFonts) return;
+  const q = fontPickerSearch.value.toLowerCase();
+  const filtered = q
+    ? activeFontPicker.allFonts.filter((f) => f.family.toLowerCase().includes(q))
+    : activeFontPicker.allFonts;
+  renderFontList(filtered, activeFontPicker.currentFamily);
+}
+
+fontPickerSearch.addEventListener("input", filterFontList);
+
+fontPickerList.addEventListener("click", (e) => {
+  const item = e.target.closest(".font-picker-item");
+  if (!item || !activeFontPicker) return;
+  const family = item.dataset.family;
+  activeFontPicker.currentFamily = family;
+  activeFontPicker.onSelect(family);
+  // Update trigger label
+  const label = activeFontPicker.triggerEl.querySelector(".font-trigger-label");
+  if (label) label.textContent = family;
+  closeFontPicker();
+});
+
+document.addEventListener("mousedown", (e) => {
+  if (!activeFontPicker) return;
+  if (!fontPickerPanel.contains(e.target) && !activeFontPicker.triggerEl.contains(e.target)) {
+    closeFontPicker();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && activeFontPicker) closeFontPicker();
+});
+
+function updateHistoryItem(id, updates) {
+  const idx = transcriptHistory.findIndex((item) => item.id === id);
+  if (idx === -1) return;
+  transcriptHistory[idx] = { ...transcriptHistory[idx], ...updates };
+  persistTranscriptHistory();
+}
+
 function setCurrentTranscript(item) {
   ensureFont(item.font_family, item.font_url);
-  currentTranscript = item;
+  currentTranscriptId = item.id;
   transcript.textContent = item.text;
-  transcript.style.fontFamily = `"${item.font_family}", sans-serif`;
+  transcript.style.fontFamily = cssFontFamily(item.font_family);
+  transcript.style.fontSize = item.font_size + "px";
+
+  transcriptFontTrigger.dataset.subset = item.script;
+  transcriptFontTrigger.querySelector(".font-trigger-label").textContent = item.font_family;
+  transcriptSizePicker.value = String(item.font_size);
   syncRobotControls();
 }
 
+function applyFontChange(id, family) {
+  const url = buildGoogleFontsUrl(family);
+  ensureFont(family, url);
+  const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
+  if (textEl) textEl.style.fontFamily = cssFontFamily(family);
+  const historyTrigger = historyList.querySelector(`.font-trigger[data-history-id="${id}"] .font-trigger-label`);
+  if (historyTrigger) historyTrigger.textContent = family;
+  if (currentTranscriptId === id) {
+    transcript.style.fontFamily = cssFontFamily(family);
+    transcriptFontTrigger.querySelector(".font-trigger-label").textContent = family;
+  }
+  updateHistoryItem(id, { font_family: family, font_url: url });
+}
+
 function clearCurrentTranscript() {
-  currentTranscript = null;
+  currentTranscriptId = null;
   transcript.textContent = DEFAULT_TRANSCRIPT_TEXT;
   transcript.style.fontFamily = "";
+  transcript.style.fontSize = "";
+  transcriptFontTrigger.dataset.subset = "latin";
+  transcriptFontTrigger.querySelector(".font-trigger-label").textContent = "Font";
+  transcriptSizePicker.value = String(DEFAULT_FONT_SIZE);
   syncRobotControls();
 }
 
@@ -169,7 +314,7 @@ function addTranscriptToHistory(item) {
 }
 
 function deleteTranscriptFromHistory(id) {
-  if (currentTranscript?.id === id) {
+  if (currentTranscriptId === id) {
     clearCurrentTranscript();
   }
 
@@ -180,6 +325,10 @@ function deleteTranscriptFromHistory(id) {
 
 function findTranscriptInHistory(id) {
   return transcriptHistory.find((item) => item.id === id) || null;
+}
+
+function getCurrentTranscript() {
+  return currentTranscriptId ? findTranscriptInHistory(currentTranscriptId) : null;
 }
 
 function renderHistory(items) {
@@ -194,7 +343,16 @@ function renderHistory(items) {
       (i) => `<div class="history-item" data-history-id="${escapeHtml(i.id)}">
         <div class="history-copy">
           <small>${escapeHtml(i.provider)} &middot; ${escapeHtml(i.language || i.script)} &middot; ${escapeHtml(new Date(i.created_at).toLocaleString())}</small>
-          <p style="font-family:'${escapeHtml(i.font_family)}',sans-serif">${escapeHtml(i.text)}</p>
+          <p style="font-family:${cssFontFamily(escapeHtml(i.font_family))};font-size:${i.font_size}px" data-history-text-id="${escapeHtml(i.id)}">${escapeHtml(i.text)}</p>
+          <div class="history-style-controls">
+            <select class="size-picker" data-history-id="${escapeHtml(i.id)}">
+              ${FONT_SIZES.map((s) => `<option value="${s}"${s === i.font_size ? " selected" : ""}>${s}</option>`).join("")}
+            </select>
+            <button type="button" class="font-trigger" data-history-id="${escapeHtml(i.id)}" data-subset="${escapeHtml(i.script)}">
+              <span class="font-trigger-label">${escapeHtml(i.font_family)}</span>
+              <span class="font-trigger-arrow">&#9662;</span>
+            </button>
+          </div>
         </div>
         <div class="history-actions">
           <button type="button" class="history-send-button" data-history-id="${escapeHtml(i.id)}" ${disableSend ? "disabled" : ""}>Send to Robot</button>
@@ -212,7 +370,7 @@ function syncRobotControls() {
   const canPair = !robotBusy;
   const canRefresh = !robotBusy;
   const canUnpair = !robotBusy && Boolean(pairedRobot);
-  const canSendTranscript = !robotBusy && Boolean(pairedRobot) && robotConnected && Boolean(currentTranscript);
+  const canSendTranscript = !robotBusy && Boolean(pairedRobot) && robotConnected && currentTranscriptId !== null;
 
   discoverRobotsButton.disabled = robotBusy;
   pairRobotButton.disabled = !canPair;
@@ -348,7 +506,6 @@ async function loadRobotState(options = {}) {
 
 function loadHistory() {
   transcriptHistory = loadTranscriptHistory();
-  persistTranscriptHistory();
   transcriptHistory.forEach((item) => ensureFont(item.font_family, item.font_url));
   renderHistory(transcriptHistory);
 }
@@ -389,7 +546,7 @@ async function pairRobot() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         host: robotHostInput.value,
-        port: Number(robotPortInput.value || 8080),
+        port: Number(robotPortInput.value || DEFAULT_ROBOT_PORT),
         pairing_code: robotPairingCodeInput.value,
         client_name: robotClientNameInput.value,
       }),
@@ -459,7 +616,7 @@ async function sendTranscriptPayloadToRobot(transcriptToSend) {
 }
 
 async function sendTranscriptToRobot() {
-  await sendTranscriptPayloadToRobot(currentTranscript);
+  await sendTranscriptPayloadToRobot(getCurrentTranscript());
 }
 
 function ext(mime) {
@@ -488,7 +645,7 @@ async function upload() {
   } catch (e) {
     transcript.textContent = "Transcription failed.";
     status.textContent = e.message;
-    currentTranscript = null;
+    currentTranscriptId = null;
     syncRobotControls();
   } finally {
     recordButton.disabled = false;
@@ -533,20 +690,72 @@ historyList.addEventListener("click", (event) => {
   const sendButton = event.target.closest(".history-send-button");
   if (sendButton) {
     const historyItem = findTranscriptInHistory(sendButton.dataset.historyId || "");
-    if (!historyItem) {
-      return;
-    }
-
-    sendTranscriptPayloadToRobot(historyItem);
+    if (historyItem) sendTranscriptPayloadToRobot(historyItem);
     return;
   }
 
   const deleteButton = event.target.closest(".history-delete-button");
-  if (!deleteButton) {
+  if (deleteButton) {
+    deleteTranscriptFromHistory(deleteButton.dataset.historyId || "");
     return;
   }
 
-  deleteTranscriptFromHistory(deleteButton.dataset.historyId || "");
+  const trigger = event.target.closest(".font-trigger[data-history-id]");
+  if (trigger) {
+    const id = trigger.dataset.historyId || "";
+    const item = findTranscriptInHistory(id);
+    if (!item) return;
+    openFontPicker(trigger, item.script, item.font_family, (family) => {
+      applyFontChange(id, family);
+    });
+  }
+});
+
+historyList.addEventListener("change", (event) => {
+  const picker = event.target.closest(".size-picker[data-history-id]");
+  if (!picker) return;
+  const id = picker.dataset.historyId || "";
+  const size = Number(picker.value);
+  const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
+  if (textEl) textEl.style.fontSize = size + "px";
+  if (currentTranscriptId === id) {
+    transcript.style.fontSize = size + "px";
+    transcriptSizePicker.value = String(size);
+  }
+  updateHistoryItem(id, { font_size: size });
+});
+
+transcriptSizePicker.addEventListener("change", () => {
+  const size = Number(transcriptSizePicker.value);
+  transcript.style.fontSize = size + "px";
+  if (currentTranscriptId) {
+    const textEl = historyList.querySelector(`[data-history-text-id="${currentTranscriptId}"]`);
+    if (textEl) textEl.style.fontSize = size + "px";
+    const historyPicker = historyList.querySelector(`.size-picker[data-history-id="${currentTranscriptId}"]`);
+    if (historyPicker) historyPicker.value = String(size);
+    updateHistoryItem(currentTranscriptId, { font_size: size });
+  }
+});
+
+transcriptFontTrigger.addEventListener("click", () => {
+  const subset = transcriptFontTrigger.dataset.subset || "latin";
+  const current = getCurrentTranscript();
+  const currentFamily = current?.font_family || "";
+  openFontPicker(
+    transcriptFontTrigger,
+    subset,
+    currentFamily,
+    (family) => {
+      if (currentTranscriptId) {
+        applyFontChange(currentTranscriptId, family);
+      } else {
+        // Pre-apply font to transcript area for next recording
+        const url = buildGoogleFontsUrl(family);
+        ensureFont(family, url);
+        transcript.style.fontFamily = cssFontFamily(family);
+      }
+    }
+  );
 });
 
 discoveredRobots.addEventListener("click", (event) => {
@@ -556,7 +765,7 @@ discoveredRobots.addEventListener("click", (event) => {
   }
 
   robotHostInput.value = button.dataset.robotHost || "";
-  robotPortInput.value = button.dataset.robotPort || "8080";
+  robotPortInput.value = button.dataset.robotPort || String(DEFAULT_ROBOT_PORT);
   robotStatus.textContent = `Loaded ${button.dataset.robotName || "robot"}. Enter the pairing code to complete pairing.`;
 });
 
@@ -578,5 +787,8 @@ discoverRobotsButton.addEventListener("click", discoverRobots);
 refreshRobotButton.addEventListener("click", loadRobotState);
 unpairRobotButton.addEventListener("click", unpairRobot);
 sendTranscriptButton.addEventListener("click", sendTranscriptToRobot);
+transcriptSizePicker.innerHTML = FONT_SIZES.map(
+  (s) => `<option value="${s}"${s === DEFAULT_FONT_SIZE ? " selected" : ""}>${s}</option>`
+).join("");
 loadHistory();
 loadRobotState();

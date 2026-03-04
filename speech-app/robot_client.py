@@ -23,6 +23,10 @@ class RobotClientError(RuntimeError):
     pass
 
 
+def _robot_key(robot: dict) -> str:
+    return f"{robot['host']}:{robot['port']}"
+
+
 def build_base_url(host: str, port: int) -> str:
     host = host.strip().rstrip("/")
     if host.startswith("http://") or host.startswith("https://"):
@@ -131,13 +135,14 @@ def interface_ipv4_configs() -> list[dict[str, str]]:
             if address.startswith("127.") or address.startswith("169.254."):
                 continue
 
-            network = ipaddress.IPv4Interface(f"{address}/{netmask}").network
+            iface = ipaddress.IPv4Interface(f"{address}/{netmask}")
             configs.append(
                 {
                     "interface": interface_name,
                     "address": address,
                     "netmask": netmask,
-                    "broadcast": address_info.broadcast or str(network.broadcast_address),
+                    "broadcast": address_info.broadcast or str(iface.network.broadcast_address),
+                    "network": iface.network,
                 }
             )
 
@@ -227,7 +232,7 @@ def udp_discovery(discovery_port: int) -> list[dict]:
                     robot = normalize_discovered_robot(payload, address[0])
                     if robot is None:
                         continue
-                    discovered[f"{robot['host']}:{robot['port']}"] = robot
+                    discovered[_robot_key(robot)] = robot
         except OSError:
             continue
 
@@ -239,8 +244,7 @@ def probe_networks() -> list[ipaddress.IPv4Network]:
     seen: set[str] = set()
 
     for config in interface_ipv4_configs():
-        interface = ipaddress.IPv4Interface(f"{config['address']}/{config['netmask']}")
-        network = interface.network
+        network = config["network"]
 
         # Avoid unbounded scans on large networks. Reduce to the interface's /24.
         if network.prefixlen < 24:
@@ -260,7 +264,7 @@ def probe_networks() -> list[ipaddress.IPv4Network]:
 def hello_probe(host: str, port: int = DEFAULT_PORT) -> dict | None:
     try:
         response = requests.get(
-            f"http://{host}:{port}/hello",
+            f"{build_base_url(host, port)}/hello",
             timeout=HELLO_PROBE_TIMEOUT_SECONDS,
         )
     except requests.RequestException:
@@ -303,7 +307,11 @@ def active_hello_probe(candidate_ports: list[int] | None = None) -> list[dict]:
                 continue
             if robot is None:
                 continue
-            discovered[f"{robot['host']}:{robot['port']}"] = robot
+            discovered[_robot_key(robot)] = robot
+            # One robot found is enough — cancel remaining probes
+            for pending in futures:
+                pending.cancel()
+            break
 
     return list(discovered.values())
 
@@ -315,10 +323,10 @@ def discover_robots(
     discovered: dict[str, dict] = {}
 
     for robot in udp_discovery(discovery_port):
-        discovered[f"{robot['host']}:{robot['port']}"] = robot
+        discovered[_robot_key(robot)] = robot
 
     if not discovered:
         for robot in active_hello_probe(candidate_ports):
-            discovered[f"{robot['host']}:{robot['port']}"] = robot
+            discovered[_robot_key(robot)] = robot
 
     return sorted(discovered.values(), key=lambda item: (item["host"], item["port"]))

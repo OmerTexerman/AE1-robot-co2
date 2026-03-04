@@ -21,7 +21,21 @@
 
       <p id="status">Ready.</p>
 
-      <div id="transcript" class="transcript">Your text will appear here.</div>
+      <div class="transcript-wrap">
+        <div id="transcript" class="transcript">Your text will appear here.</div>
+        <div class="transcript-controls">
+          <select class="size-picker" id="transcriptSizePicker"></select>
+          <button type="button" class="font-trigger" id="transcriptFontTrigger">
+            <span class="font-trigger-label">Font</span>
+            <span class="font-trigger-arrow">&#9662;</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="fontPickerPanel" class="font-picker-panel">
+        <input type="text" class="font-picker-search" id="fontPickerSearch" placeholder="Search fonts..." autocomplete="off" />
+        <div class="font-picker-list" id="fontPickerList"></div>
+      </div>
 
       <section class="robot-panel">
         <div class="section-header">
