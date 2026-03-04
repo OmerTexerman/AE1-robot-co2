@@ -33,6 +33,7 @@ button:disabled { opacity: 0.4; }
   min-height: 100px;
   border: 1px solid #ccc;
   white-space: pre-wrap;
+  overflow-wrap: break-word;
   font-size: 20px;
   line-height: 1.6;
 }
@@ -52,6 +53,7 @@ button:disabled { opacity: 0.4; }
 
 .history-item p {
   margin: 0.35rem 0 0;
+  overflow-wrap: break-word;
 }
 
 .history-copy {
