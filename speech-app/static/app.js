@@ -32,6 +32,7 @@ let robotConnected = false;
 let activeRobotAction = null;
 let robotPollTimer = null;
 let robotStateRequestInFlight = false;
+let robotStateMutationVersion = 0;
 
 function escapeHtml(s) {
   const d = document.createElement("div");
@@ -134,7 +135,7 @@ function persistTranscriptHistory() {
 }
 
 function updateHistoryActionButtons() {
-  const disableSend = activeRobotAction !== null || robotStateRequestInFlight || !pairedRobot || !robotConnected;
+  const disableSend = activeRobotAction !== null || !pairedRobot || !robotConnected;
   historyList.querySelectorAll(".history-send-button").forEach((button) => {
     button.disabled = disableSend;
   });
@@ -187,7 +188,7 @@ function renderHistory(items) {
     return;
   }
 
-  const disableSend = activeRobotAction !== null || robotStateRequestInFlight || !pairedRobot || !robotConnected;
+  const disableSend = activeRobotAction !== null || !pairedRobot || !robotConnected;
   historyList.innerHTML = items
     .map(
       (i) => `<div class="history-item" data-history-id="${escapeHtml(i.id)}">
@@ -207,7 +208,7 @@ function renderHistory(items) {
 }
 
 function syncRobotControls() {
-  const robotBusy = activeRobotAction !== null || robotStateRequestInFlight;
+  const robotBusy = activeRobotAction !== null;
   const canPair = !robotBusy;
   const canRefresh = !robotBusy;
   const canUnpair = !robotBusy && Boolean(pairedRobot);
@@ -219,6 +220,10 @@ function syncRobotControls() {
   unpairRobotButton.disabled = !canUnpair;
   sendTranscriptButton.disabled = !canSendTranscript;
   updateHistoryActionButtons();
+}
+
+function markRobotStateMutation() {
+  robotStateMutationVersion += 1;
 }
 
 function stopRobotPolling() {
@@ -235,7 +240,7 @@ function scheduleRobotPoll() {
   }
 
   robotPollTimer = window.setTimeout(() => {
-    loadRobotState({ silent: true });
+    loadRobotState({ silent: true, passive: true });
   }, 8000);
 }
 
@@ -302,26 +307,39 @@ function renderDiscoveredRobots(items) {
 }
 
 async function loadRobotState(options = {}) {
-  const { silent = false } = options;
+  const { silent = false, passive = false } = options;
   if (robotStateRequestInFlight) {
     return;
   }
 
+  const mutationVersion = robotStateMutationVersion;
   robotStateRequestInFlight = true;
-  syncRobotControls();
+  if (!passive) {
+    syncRobotControls();
+  }
   try {
     const payload = await fetchJson("/robot");
+    if (mutationVersion !== robotStateMutationVersion) {
+      return;
+    }
     renderRobotState(payload, { preserveStatus: silent });
   } catch (error) {
+    if (mutationVersion !== robotStateMutationVersion) {
+      return;
+    }
     robotConnection.textContent = "Robot status unavailable.";
     robotConnected = false;
     if (!silent) {
       robotStatus.textContent = error.message || "Unable to load robot state.";
     }
-    syncRobotControls();
+    if (!passive) {
+      syncRobotControls();
+    }
   } finally {
     robotStateRequestInFlight = false;
-    syncRobotControls();
+    if (!passive) {
+      syncRobotControls();
+    }
     if (pairedRobot) {
       scheduleRobotPoll();
     }
@@ -361,6 +379,7 @@ async function discoverRobots() {
 
 async function pairRobot() {
   robotStatus.textContent = "Pairing with robot...";
+  markRobotStateMutation();
   activeRobotAction = "pair";
   syncRobotControls();
 
@@ -389,6 +408,7 @@ async function pairRobot() {
 
 async function unpairRobot() {
   robotStatus.textContent = "Removing robot pairing...";
+  markRobotStateMutation();
   activeRobotAction = "unpair";
   syncRobotControls();
 
@@ -547,7 +567,7 @@ document.addEventListener("visibilitychange", () => {
   }
 
   if (pairedRobot) {
-    loadRobotState({ silent: true });
+    loadRobotState({ silent: true, passive: true });
   }
 });
 
