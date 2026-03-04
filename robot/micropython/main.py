@@ -238,23 +238,47 @@ def handle_request(client, ip_address):
 
     if method == "POST" and path == "/render":
         job_id = "{}-{}".format(device_id()[:6], int(time.time()))
-        render_job = {
-            "job_id": job_id,
-            "text": payload.get("text", ""),
-            "font_family": payload.get("font_family", "Noto Sans"),
-            "script": payload.get("script", "latin"),
-            "submitted_at": payload.get("submitted_at"),
-            "received_at": time.time(),
-        }
-        save_json(LAST_RENDER_PATH, render_job)
-        log(
-            "render accepted job_id={} chars={} font={} script={}".format(
-                job_id,
-                len(render_job["text"]),
-                render_job["font_family"],
-                render_job["script"],
+        mode = payload.get("mode", "write")
+
+        if mode == "braille":
+            render_job = {
+                "job_id": job_id,
+                "mode": "braille",
+                "cells": payload.get("cells", []),
+                "language": payload.get("language", "en"),
+                "grade": payload.get("grade", 1),
+                "submitted_at": payload.get("submitted_at"),
+                "received_at": time.time(),
+            }
+            save_json(LAST_RENDER_PATH, render_job)
+            log(
+                "render accepted job_id={} mode=braille cells={} language={} grade={}".format(
+                    job_id,
+                    len(render_job["cells"]),
+                    render_job["language"],
+                    render_job["grade"],
+                )
             )
-        )
+        else:
+            render_job = {
+                "job_id": job_id,
+                "mode": "write",
+                "text": payload.get("text", ""),
+                "font_family": payload.get("font_family", "Noto Sans"),
+                "script": payload.get("script", "latin"),
+                "submitted_at": payload.get("submitted_at"),
+                "received_at": time.time(),
+            }
+            save_json(LAST_RENDER_PATH, render_job)
+            log(
+                "render accepted job_id={} mode=write chars={} font={} script={}".format(
+                    job_id,
+                    len(render_job["text"]),
+                    render_job["font_family"],
+                    render_job["script"],
+                )
+            )
+
         json_response(client, 200, {"accepted": True, "job_id": job_id})
         return
 

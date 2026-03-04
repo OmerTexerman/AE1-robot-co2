@@ -8,9 +8,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
+from braille_translator import available_grades, normalize_grade, translate_to_braille, translate_to_braille_text
 from font_selector import choose_font
 from google_fonts import DEFAULT_FONT_FAMILY, get_fonts_for_subset, warm_cache
-from robot_client import DEFAULT_PORT, RobotClientError, send_render_job
+from robot_client import DEFAULT_PORT, RobotClientError, send_braille_job, send_render_job
 from robot_service import (
     discover_available_robots,
     get_current_robot,
@@ -90,6 +91,17 @@ def parse_render_request(payload: dict) -> tuple[str, str, str]:
     return text, font_family, script
 
 
+def parse_braille_render_request(payload: dict) -> tuple[str, str, int]:
+    text = str(payload.get("text", "")).strip()
+    language = str(payload.get("language", "")).strip() or "en"
+    grade = normalize_grade(payload.get("grade"))
+
+    if not text:
+        raise ValueError("Text is required before sending to the robot.")
+
+    return text, language, grade
+
+
 def save_uploaded_audio(audio) -> Path:
     suffix = Path(audio.filename).suffix or ".webm"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
@@ -112,6 +124,27 @@ def build_transcription_response(
         "language_confidence": transcription.get("language_confidence"),
         "created_at": created_at,
     }
+
+
+@app.post("/braille/preview")
+def braille_preview():
+    payload = request_payload()
+    text = str(payload.get("text", "")).strip()
+    language = str(payload.get("language", "")).strip() or "en"
+    grade = normalize_grade(payload.get("grade"))
+
+    if not text:
+        return jsonify({"error": "Text is required."}), 400
+
+    braille_text = translate_to_braille_text(text, language, grade)
+    return jsonify({"braille_text": braille_text})
+
+
+@app.get("/braille/grades")
+def braille_grades():
+    language = request.args.get("language", "").strip() or "en"
+    grades = available_grades(language)
+    return jsonify({"language": language, "grades": grades})
 
 
 @app.get("/robot")
@@ -211,8 +244,41 @@ def robot_render():
     if not config:
         return jsonify({"error": "No robot is paired."}), 400
 
+    payload = request_payload()
+    mode = str(payload.get("mode", "write")).strip()
+
+    if mode == "braille":
+        try:
+            text, language, grade = parse_braille_render_request(payload)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        app.logger.info(
+            "robot_render braille requested device=%s host=%s port=%s chars=%s language=%s grade=%s",
+            config["device_name"], config["host"], config["port"],
+            len(text), language, grade,
+        )
+
+        cells = translate_to_braille(text, language, grade)
+
+        try:
+            result = send_braille_job(config, cells=cells, language=language, grade=grade)
+        except RobotClientError as exc:
+            app.logger.warning(
+                "robot_render braille failed device=%s host=%s port=%s error=%s",
+                config["device_name"], config["host"], config["port"], exc,
+            )
+            return jsonify({"error": str(exc)}), 502
+
+        app.logger.info(
+            "robot_render braille accepted device=%s host=%s port=%s job_id=%s cells=%s",
+            config["device_name"], config["host"], config["port"],
+            result.get("job_id"), len(cells),
+        )
+        return jsonify(result)
+
     try:
-        text, font_family, script = parse_render_request(request_payload())
+        text, font_family, script = parse_render_request(payload)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 

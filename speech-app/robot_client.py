@@ -104,9 +104,30 @@ def send_render_job(config: dict, text: str, font_family: str, script: str) -> d
         f"{config['base_url']}/render",
         headers=auth_headers(config),
         json={
+            "mode": "write",
             "text": text,
             "font_family": font_family,
             "script": script,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
+def send_braille_job(
+    config: dict,
+    cells: list[list[int]],
+    language: str,
+    grade: int,
+) -> dict:
+    return request_json(
+        "post",
+        f"{config['base_url']}/render",
+        headers=auth_headers(config),
+        json={
+            "mode": "braille",
+            "cells": cells,
+            "language": language,
+            "grade": grade,
             "submitted_at": datetime.now(timezone.utc).isoformat(),
         },
     )

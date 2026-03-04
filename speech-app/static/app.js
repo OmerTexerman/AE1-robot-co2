@@ -18,6 +18,7 @@ const robotStatus = document.getElementById("robotStatus");
 const robotMeta = document.getElementById("robotMeta");
 const discoveredRobots = document.getElementById("discoveredRobots");
 
+const brailleSelect = document.getElementById("brailleSelect");
 const transcriptFontTrigger = document.getElementById("transcriptFontTrigger");
 const transcriptSizePicker = document.getElementById("transcriptSizePicker");
 const fontPickerPanel = document.getElementById("fontPickerPanel");
@@ -41,6 +42,29 @@ let pairedRobot = null;
 let robotConnected = false;
 let activeRobotAction = null;
 const fontCache = {};
+let braillePreviewActive = false;
+
+function brailleActive() { return brailleSelect.value !== "off"; }
+function brailleGrade() { return Number(brailleSelect.value); }
+
+async function updateBrailleGradeOptions(language) {
+  try {
+    const data = await fetchJson(`/braille/grades?language=${encodeURIComponent(language || "en")}`);
+    const grades = data.grades || [];
+    for (const opt of brailleSelect.options) {
+      if (opt.value === "off") continue;
+      opt.disabled = !grades.includes(Number(opt.value));
+    }
+    // If current selection is now disabled, fall back to "off"
+    if (brailleSelect.selectedOptions[0]?.disabled) {
+      brailleSelect.value = "off";
+      restoreBraillePreview();
+    }
+  } catch {
+    // On error, keep all options enabled
+    for (const opt of brailleSelect.options) opt.disabled = false;
+  }
+}
 let activeFontPicker = null; // { triggerEl, subset, currentFamily, onSelect }
 let robotPollTimer = null;
 let robotStateRequestInFlight = false;
@@ -50,6 +74,55 @@ function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+async function fetchBraillePreview(text, language, grade) {
+  const data = await fetchJson("/braille/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, language, grade }),
+  });
+  return data.braille_text || "";
+}
+
+async function applyBraillePreview() {
+  if (!brailleActive()) {
+    restoreBraillePreview();
+    return;
+  }
+
+  const current = getCurrentTranscript();
+  const text = current ? current.text : DEFAULT_TRANSCRIPT_TEXT;
+  const language = current ? current.language : "en";
+  const snapshotId = currentTranscriptId;
+
+  try {
+    const brailleText = await fetchBraillePreview(
+      text,
+      language,
+      brailleGrade(),
+    );
+    // Re-check state hasn't changed during the async call
+    if (!brailleActive() || currentTranscriptId !== snapshotId) return;
+    transcript.textContent = brailleText;
+    transcript.style.fontFamily = "";
+    braillePreviewActive = true;
+  } catch {
+    // Silently fall back to original text
+  }
+}
+
+function restoreBraillePreview() {
+  if (!braillePreviewActive) return;
+  braillePreviewActive = false;
+  const current = getCurrentTranscript();
+  if (current) {
+    transcript.textContent = current.text;
+    transcript.style.fontFamily = cssFontFamily(current.font_family);
+  } else {
+    transcript.textContent = DEFAULT_TRANSCRIPT_TEXT;
+    transcript.style.fontFamily = "";
+  }
 }
 
 const loadedFonts = new Set();
@@ -266,6 +339,7 @@ function updateHistoryItem(id, updates) {
 function setCurrentTranscript(item) {
   ensureFont(item.font_family, item.font_url);
   currentTranscriptId = item.id;
+  braillePreviewActive = false;
   transcript.textContent = item.text;
   transcript.style.fontFamily = cssFontFamily(item.font_family);
   transcript.style.fontSize = item.font_size + "px";
@@ -274,6 +348,9 @@ function setCurrentTranscript(item) {
   transcriptFontTrigger.querySelector(".font-trigger-label").textContent = item.font_family;
   transcriptSizePicker.value = String(item.font_size);
   syncRobotControls();
+  updateBrailleGradeOptions(item.language);
+
+  if (brailleActive()) applyBraillePreview();
 }
 
 function applyFontChange(id, family) {
@@ -292,6 +369,7 @@ function applyFontChange(id, family) {
 
 function clearCurrentTranscript() {
   currentTranscriptId = null;
+  braillePreviewActive = false;
   transcript.textContent = DEFAULT_TRANSCRIPT_TEXT;
   transcript.style.fontFamily = "";
   transcript.style.fontSize = "";
@@ -299,6 +377,8 @@ function clearCurrentTranscript() {
   transcriptFontTrigger.querySelector(".font-trigger-label").textContent = "Font";
   transcriptSizePicker.value = String(DEFAULT_FONT_SIZE);
   syncRobotControls();
+
+  if (brailleActive()) applyBraillePreview();
 }
 
 function addTranscriptToHistory(item) {
@@ -352,6 +432,7 @@ function renderHistory(items) {
               <span class="font-trigger-label">${escapeHtml(i.font_family)}</span>
               <span class="font-trigger-arrow">&#9662;</span>
             </button>
+            <button type="button" class="braille-toggle" data-history-id="${escapeHtml(i.id)}">Braille</button>
           </div>
         </div>
         <div class="history-actions">
@@ -591,22 +672,36 @@ async function sendTranscriptPayloadToRobot(transcriptToSend) {
     return;
   }
 
-  robotStatus.textContent = "Sending transcript to robot...";
+  robotStatus.textContent = brailleActive()
+    ? "Sending Braille to robot..."
+    : "Sending transcript to robot...";
   activeRobotAction = "render";
   syncRobotControls();
 
   try {
+    const renderBody = brailleActive()
+      ? {
+          mode: "braille",
+          text: transcriptToSend.text,
+          language: transcriptToSend.language,
+          grade: brailleGrade(),
+        }
+      : {
+          mode: "write",
+          text: transcriptToSend.text,
+          font_family: transcriptToSend.font_family,
+          script: transcriptToSend.script,
+        };
+
     const payload = await fetchJson("/robot/render", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text: transcriptToSend.text,
-        font_family: transcriptToSend.font_family,
-        script: transcriptToSend.script,
-      }),
+      body: JSON.stringify(renderBody),
     });
 
-    robotStatus.textContent = `Robot accepted job ${payload.job_id}.`;
+    robotStatus.textContent = brailleActive()
+      ? `Robot accepted Braille job ${payload.job_id}.`
+      : `Robot accepted job ${payload.job_id}.`;
   } catch (error) {
     robotStatus.textContent = error.message || "Unable to send transcript.";
   } finally {
@@ -700,6 +795,34 @@ historyList.addEventListener("click", (event) => {
     return;
   }
 
+  const brailleBtn = event.target.closest(".braille-toggle[data-history-id]");
+  if (brailleBtn) {
+    const id = brailleBtn.dataset.historyId || "";
+    const item = findTranscriptInHistory(id);
+    if (!item) return;
+    const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
+    if (!textEl) return;
+
+    if (brailleBtn.classList.contains("active")) {
+      // Restore original text
+      brailleBtn.classList.remove("active");
+      textEl.textContent = item.text;
+      textEl.style.fontFamily = cssFontFamily(item.font_family);
+    } else {
+      // Fetch and show Braille preview
+      brailleBtn.disabled = true;
+      fetchBraillePreview(item.text, item.language, brailleGrade())
+        .then((brailleText) => {
+          brailleBtn.classList.add("active");
+          textEl.textContent = brailleText;
+          textEl.style.fontFamily = "";
+        })
+        .catch(() => {})
+        .finally(() => { brailleBtn.disabled = false; });
+    }
+    return;
+  }
+
   const trigger = event.target.closest(".font-trigger[data-history-id]");
   if (trigger) {
     const id = trigger.dataset.historyId || "";
@@ -777,6 +900,14 @@ document.addEventListener("visibilitychange", () => {
 
   if (pairedRobot) {
     loadRobotState({ silent: true, passive: true });
+  }
+});
+
+brailleSelect.addEventListener("change", () => {
+  if (brailleActive()) {
+    applyBraillePreview();
+  } else {
+    restoreBraillePreview();
   }
 });
 
