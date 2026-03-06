@@ -8,7 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
-from braille_translator import available_grades, normalize_grade, translate_to_braille, translate_to_braille_text
+from braille_translator import available_grades, normalize_grade, translate_to_braille_text
 from font_selector import choose_font
 from google_fonts import DEFAULT_FONT_FAMILY, get_fonts_for_subset, warm_cache
 from robot_client import DEFAULT_PORT, RobotClientError, send_braille_job, send_render_job
@@ -114,16 +114,20 @@ def build_transcription_response(
     font: dict[str, str],
     created_at: str,
 ) -> dict:
+    language = str(transcription.get("language") or "")
     return {
         "text": transcription["text"],
         "script": font["script"],
         "font_family": font["font_family"],
         "font_url": font["font_url"],
         "provider": transcription["provider"],
-        "language": str(transcription.get("language") or ""),
+        "language": language,
         "language_confidence": transcription.get("language_confidence"),
         "created_at": created_at,
+        "available_grades": available_grades(language or "en"),
     }
+
+
 
 
 @app.post("/braille/preview")

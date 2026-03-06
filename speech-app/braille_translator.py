@@ -4,7 +4,7 @@ import louis
 # Grade 1: try "{lang}.tbl" dynamically; override where the
 # ISO 639-1 code doesn't match an available .tbl filename.
 _G1_OVERRIDES: dict[str, str] = {
-    "en": "en_US.tbl",
+    "en": "en-ueb-g1.ctb",
     "zh": "zh_CHN.tbl",
     "fr": "fr-bfu-comp6.utb",
     "de": "de-g0.utb",
