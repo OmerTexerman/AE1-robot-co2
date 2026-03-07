@@ -12,12 +12,20 @@ try:
 except ImportError:
     raise RuntimeError("Copy secrets.example.py to secrets.py and fill in Wi-Fi settings.")
 
+try:
+    from boot import cdc_data
+except Exception:
+    cdc_data = None
+
 
 STATE_PATH = "pairing_state.json"
 LAST_RENDER_PATH = "last_render.json"
 BUFFER_SIZE = 4096
+SERIAL_BUF_MAX = 4096
 DISCOVERY_MAGIC = b"AE1_DISCOVERY_V1"
 CLIENT_TIMEOUT_SECONDS = 3
+
+_state_cache = None
 
 
 def log(message):
@@ -39,27 +47,29 @@ def save_json(path, payload):
         ujson.dump(payload, handle)
 
 
+def load_state():
+    global _state_cache
+    if _state_cache is None:
+        _state_cache = load_json(STATE_PATH, {})
+    return _state_cache
+
+
+def save_state(state):
+    global _state_cache
+    save_json(STATE_PATH, state)
+    _state_cache = state
+
+
+DEVICE_ID = ubinascii.hexlify(unique_id()).decode()
+
+
 def device_id():
-    return ubinascii.hexlify(unique_id()).decode()
+    return DEVICE_ID
 
 
 def make_token():
     return "{:08x}{:08x}".format(urandom.getrandbits(32), urandom.getrandbits(32))
 
-
-def connect_wifi():
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    if wlan.isconnected():
-        return wlan.ifconfig()[0]
-
-    wlan.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
-    for _ in range(30):
-        if wlan.isconnected():
-            return wlan.ifconfig()[0]
-        time.sleep(1)
-
-    raise RuntimeError("Wi-Fi connection failed.")
 
 
 def send_all(client, payload):
@@ -94,7 +104,7 @@ def error_response(client, status_code, message):
 
 
 def parse_request(client):
-    data = b""
+    data = bytearray()
     while b"\r\n\r\n" not in data and len(data) < BUFFER_SIZE:
         try:
             chunk = client.recv(512)
@@ -102,12 +112,12 @@ def parse_request(client):
             raise ValueError("socket read failed: {}".format(exc))
         if not chunk:
             raise ValueError("client disconnected before request headers completed")
-        data += chunk
+        data.extend(chunk)
 
     if b"\r\n\r\n" not in data:
         raise ValueError("request headers too large or incomplete")
 
-    header_blob, _, body = data.partition(b"\r\n\r\n")
+    header_blob, _, body = bytes(data).partition(b"\r\n\r\n")
     header_lines = header_blob.decode().split("\r\n")
     try:
         method, path, _ = header_lines[0].split(" ", 2)
@@ -125,14 +135,17 @@ def parse_request(client):
         content_length = int(headers.get("content-length", "0"))
     except ValueError:
         raise ValueError("invalid content length")
-    while len(body) < content_length:
-        try:
-            chunk = client.recv(min(512, content_length - len(body)))
-        except OSError as exc:
-            raise ValueError("socket body read failed: {}".format(exc))
-        if not chunk:
-            raise ValueError("client disconnected before request body completed")
-        body += chunk
+    if len(body) < content_length:
+        body_buf = bytearray(body)
+        while len(body_buf) < content_length:
+            try:
+                chunk = client.recv(min(512, content_length - len(body_buf)))
+            except OSError as exc:
+                raise ValueError("socket body read failed: {}".format(exc))
+            if not chunk:
+                raise ValueError("client disconnected before request body completed")
+            body_buf.extend(chunk)
+        body = bytes(body_buf)
 
     payload = {}
     if content_length:
@@ -158,57 +171,41 @@ def hello_payload(ip_address, state):
     }
 
 
-def handle_request(client, ip_address):
-    try:
-        request = parse_request(client)
-    except ValueError as exc:
-        log("request parse failed error={}".format(exc))
-        error_response(client, 400, "Bad request: {}".format(exc))
-        return
-
-    method, path, headers, payload = request
-    state = load_json(STATE_PATH, {})
-    log("request method={} path={}".format(method, path))
+def dispatch_request(method, path, headers, payload, ip_address, skip_auth=False):
+    state = load_state()
+    log("request method={} path={} skip_auth={}".format(method, path, skip_auth))
 
     if method == "GET" and path == "/hello":
         log("hello request from client")
-        json_response(client, 200, hello_payload(ip_address, state))
-        return
+        return 200, hello_payload(ip_address, state)
 
     if method == "POST" and path == "/pair":
         if payload.get("pairing_code") != secrets.PAIRING_CODE:
             log("pair rejected client_name={} reason=incorrect_code".format(payload.get("client_name", "")))
-            json_response(client, 403, {"error": "Incorrect pairing code."})
-            return
+            return 403, {"error": "Incorrect pairing code."}
 
         state = {
             "pair_token": make_token(),
             "paired_client": payload.get("client_name", "speech-app"),
             "paired_at": time.time(),
         }
-        save_json(STATE_PATH, state)
+        save_state(state)
         log(
             "pair accepted client_name={} token={}...".format(
                 state["paired_client"],
                 state["pair_token"][:8],
             )
         )
-        json_response(
-            client,
-            200,
-            {
-                "device_name": secrets.DEVICE_NAME,
-                "device_id": device_id(),
-                "pair_token": state["pair_token"],
-                "paired_client": state["paired_client"],
-            },
-        )
-        return
+        return 200, {
+            "device_name": secrets.DEVICE_NAME,
+            "device_id": device_id(),
+            "pair_token": state["pair_token"],
+            "paired_client": state["paired_client"],
+        }
 
-    if not require_token(headers, state):
+    if not skip_auth and not require_token(headers, state):
         log("auth rejected path={} reason=invalid_token".format(path))
-        json_response(client, 401, {"error": "Missing or invalid pair token."})
-        return
+        return 401, {"error": "Missing or invalid pair token."}
 
     if method == "GET" and path == "/status":
         last_render = load_json(LAST_RENDER_PATH, {})
@@ -218,39 +215,33 @@ def handle_request(client, ip_address):
                 last_render.get("job_id"),
             )
         )
-        json_response(
-            client,
-            200,
-            {
-                "device_name": secrets.DEVICE_NAME,
-                "device_id": device_id(),
-                "paired_client": state.get("paired_client"),
-                "last_render": last_render,
-            },
-        )
-        return
+        return 200, {
+            "device_name": secrets.DEVICE_NAME,
+            "device_id": device_id(),
+            "paired_client": state.get("paired_client"),
+            "last_render": last_render,
+        }
 
     if method == "POST" and path == "/unpair":
-        save_json(STATE_PATH, {})
+        save_state({})
         log("unpair completed")
-        json_response(client, 200, {"ok": True})
-        return
+        return 200, {"ok": True}
 
     if method == "POST" and path == "/render":
         job_id = "{}-{}".format(device_id()[:6], int(time.time()))
         mode = payload.get("mode", "write")
 
+        render_job = {
+            "job_id": job_id,
+            "mode": mode,
+            "submitted_at": payload.get("submitted_at"),
+            "received_at": time.time(),
+        }
+
         if mode == "braille":
-            render_job = {
-                "job_id": job_id,
-                "mode": "braille",
-                "cells": payload.get("cells", []),
-                "language": payload.get("language", "en"),
-                "grade": payload.get("grade", 1),
-                "submitted_at": payload.get("submitted_at"),
-                "received_at": time.time(),
-            }
-            save_json(LAST_RENDER_PATH, render_job)
+            render_job["cells"] = payload.get("cells", [])
+            render_job["language"] = payload.get("language", "en")
+            render_job["grade"] = payload.get("grade", 1)
             log(
                 "render accepted job_id={} mode=braille cells={} language={} grade={}".format(
                     job_id,
@@ -260,16 +251,9 @@ def handle_request(client, ip_address):
                 )
             )
         else:
-            render_job = {
-                "job_id": job_id,
-                "mode": "write",
-                "text": payload.get("text", ""),
-                "font_family": payload.get("font_family", "Noto Sans"),
-                "script": payload.get("script", "latin"),
-                "submitted_at": payload.get("submitted_at"),
-                "received_at": time.time(),
-            }
-            save_json(LAST_RENDER_PATH, render_job)
+            render_job["text"] = payload.get("text", "")
+            render_job["font_family"] = payload.get("font_family", "Noto Sans")
+            render_job["script"] = payload.get("script", "latin")
             log(
                 "render accepted job_id={} mode=write chars={} font={} script={}".format(
                     job_id,
@@ -279,11 +263,62 @@ def handle_request(client, ip_address):
                 )
             )
 
-        json_response(client, 200, {"accepted": True, "job_id": job_id})
-        return
+        save_json(LAST_RENDER_PATH, render_job)
+        return 200, {"accepted": True, "job_id": job_id}
 
     log("request not found path={}".format(path))
-    json_response(client, 404, {"error": "Not found."})
+    return 404, {"error": "Not found."}
+
+
+def handle_request(client, ip_address):
+    try:
+        request = parse_request(client)
+    except ValueError as exc:
+        log("request parse failed error={}".format(exc))
+        error_response(client, 400, "Bad request: {}".format(exc))
+        return
+
+    method, path, headers, payload = request
+
+    try:
+        status_code, response_body = dispatch_request(method, path, headers, payload, ip_address)
+    except Exception as exc:
+        log("dispatch crashed error={}".format(exc))
+        error_response(client, 500, "Robot server error: {}".format(exc))
+        return
+
+    json_response(client, status_code, response_body)
+
+
+def serial_write(cdc, data):
+    try:
+        cdc.write(data)
+    except Exception as exc:
+        log("serial write error={}".format(exc))
+
+
+def handle_serial_command(cdc, line, ip_address):
+    try:
+        cmd = ujson.loads(line)
+    except ValueError:
+        serial_write(cdc, ujson.dumps({"status": 400, "body": {"error": "Invalid JSON"}}).encode() + b"\n")
+        return
+
+    method = cmd.get("method", "GET").upper()
+    path = cmd.get("path", "/")
+    headers = cmd.get("headers", {})
+    payload = cmd.get("body", {})
+
+    try:
+        status_code, response_body = dispatch_request(
+            method, path, headers, payload, ip_address, skip_auth=True
+        )
+    except Exception as exc:
+        log("serial dispatch crashed error={}".format(exc))
+        status_code = 500
+        response_body = {"error": "Robot server error: {}".format(exc)}
+
+    serial_write(cdc, ujson.dumps({"status": status_code, "body": response_body}).encode() + b"\n")
 
 
 def handle_discovery(discovery_socket, ip_address):
@@ -296,15 +331,69 @@ def handle_discovery(discovery_socket, ip_address):
         return
 
     log("discovery reply sent to {}:{}".format(address[0], address[1]))
-    response = ujson.dumps(hello_payload(ip_address, load_json(STATE_PATH, {})))
+    response = ujson.dumps(hello_payload(ip_address, load_state()))
     discovery_socket.sendto(response.encode(), address)
 
 
+def drain_serial(cdc, serial_buf, ip_address):
+    chunk = cdc.read(-1)
+    if not chunk:
+        return serial_buf
+
+    serial_buf.extend(chunk)
+    if len(serial_buf) > SERIAL_BUF_MAX:
+        log("serial buffer overflow, discarding {} bytes".format(len(serial_buf)))
+        serial_buf[:] = b""
+        return serial_buf
+    while True:
+        nl = serial_buf.find(b"\n")
+        if nl < 0:
+            break
+        line = bytes(serial_buf[:nl]).strip()
+        serial_buf[:] = serial_buf[nl + 1:]
+        if line:
+            try:
+                handle_serial_command(cdc, line.decode(), ip_address)
+            except Exception as exc:
+                log("serial command error={}".format(exc))
+    return serial_buf
+
+
 def serve():
-    ip_address = connect_wifi()
-    log("Robot Wi-Fi ready at http://{}:{}".format(ip_address, secrets.LISTEN_PORT))
+    serial_buf = bytearray()
+    ip_address = "0.0.0.0"
+
+    # Start WiFi connection (non-blocking kick-off)
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        wlan.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
+
+    # Set up serial immediately so USB responds while WiFi connects
+    poller = uselect.poll()
+
+    if cdc_data is not None:
+        log("CDC data channel available")
+
+    # Wait for WiFi, but service serial commands while waiting
+    log("Waiting for Wi-Fi (serial is active)...")
+    for _ in range(60):
+        if wlan.isconnected():
+            break
+
+        time.sleep(0.5)
+        if cdc_data is not None:
+            serial_buf = drain_serial(cdc_data, serial_buf, ip_address)
+
+    if wlan.isconnected():
+        ip_address = wlan.ifconfig()[0]
+        log("Robot Wi-Fi ready at http://{}:{}".format(ip_address, secrets.LISTEN_PORT))
+    else:
+        log("Wi-Fi connection failed. Continuing with USB serial only.")
+
     log("Pairing code: {}".format(secrets.PAIRING_CODE))
 
+    # Set up TCP/UDP servers (bind even without WiFi — they'll just get no traffic)
     tcp_address = socket.getaddrinfo("0.0.0.0", secrets.LISTEN_PORT)[0][-1]
     tcp_server = socket.socket()
     tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -319,7 +408,6 @@ def serve():
     udp_server.bind(udp_address)
     udp_server.setblocking(False)
 
-    poller = uselect.poll()
     poller.register(tcp_server, uselect.POLLIN)
     poller.register(udp_server, uselect.POLLIN)
 
@@ -338,6 +426,9 @@ def serve():
                     client.close()
             elif sock is udp_server:
                 handle_discovery(udp_server, ip_address)
+        # Always drain CDC after poll — poll never fires POLLIN for CDCInterface
+        if cdc_data is not None:
+            serial_buf = drain_serial(cdc_data, serial_buf, ip_address)
 
 
 serve()

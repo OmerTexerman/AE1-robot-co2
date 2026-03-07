@@ -6,8 +6,10 @@ services:
     env_file:
       - ./speech-app/.env
     network_mode: host
+    privileged: true
     volumes:
       - whisper-models:/root/.cache/huggingface
+      - /dev:/dev
 
   mock-robot:
     build: ./robot/mock

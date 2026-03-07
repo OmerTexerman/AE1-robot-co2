@@ -6,6 +6,7 @@ Hershey-Fonts>=2.1.0
 openai==1.66.3
 psutil==7.0.0
 python-dotenv==1.0.1
+pyserial>=3.5
 requests==2.32.3
 scipy>=1.11.0
 shapely>=2.0.0

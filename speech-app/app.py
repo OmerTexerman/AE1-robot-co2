@@ -23,7 +23,7 @@ from paper_sizes import (
 )
 from font_renderer import list_hershey_fonts
 from toolpath import generate_braille_toolpath, generate_write_toolpath
-from robot_client import DEFAULT_PORT, RobotClientError, send_braille_job, send_render_job
+from robot_client import DEFAULT_PORT, TRANSPORT_SERIAL, RobotClientError, close_transport, send_braille_job, send_render_job
 from robot_service import (
     discover_available_robots,
     get_current_robot,
@@ -31,6 +31,7 @@ from robot_service import (
     init_robot_session,
     paired_robot_payload,
     pair_with_robot,
+    pair_with_robot_usb,
     set_current_robot,
     unpaired_robot_payload,
     unpair_current_robot,
@@ -170,7 +171,14 @@ def robot_state():
         app.logger.info("robot_state requested with no paired robot")
         return jsonify(unpaired_robot_payload())
 
-    return jsonify(paired_robot_payload(config, **get_robot_connection_state(app.logger, config)))
+    connection_state = get_robot_connection_state(app.logger, config)
+    if connection_state.pop("disconnected", False):
+        close_transport(config)
+        set_current_robot(app, None)
+        app.logger.info("robot auto-unpaired due to USB disconnect serial_port=%s", config.get("serial_port"))
+        return jsonify(unpaired_robot_payload("USB robot disconnected."))
+
+    return jsonify(paired_robot_payload(config, **connection_state))
 
 
 @app.post("/robot/discover")
@@ -203,8 +211,26 @@ def robot_discover():
 
 @app.post("/robot/pair")
 def robot_pair():
+    payload = request_payload()
+
+    if payload.get("transport") == TRANSPORT_SERIAL:
+        serial_port = str(payload.get("serial_port", "")).strip()
+        client_name = str(payload.get("client_name", "speech-app")).strip() or "speech-app"
+        if not serial_port:
+            return jsonify({"error": "Serial port is required for USB pairing."}), 400
+
+        app.logger.info("robot_pair_usb requested serial_port=%s client_name=%s", serial_port, client_name)
+        try:
+            config, connection_state = pair_with_robot_usb(app.logger, serial_port, client_name)
+        except RobotClientError as exc:
+            app.logger.warning("robot_pair_usb failed serial_port=%s error=%s", serial_port, exc)
+            return jsonify({"error": str(exc)}), 502
+
+        set_current_robot(app, config)
+        return jsonify(paired_robot_payload(config, **connection_state))
+
     try:
-        host, port, pairing_code, client_name = parse_pairing_request(request_payload())
+        host, port, pairing_code, client_name = parse_pairing_request(payload)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 

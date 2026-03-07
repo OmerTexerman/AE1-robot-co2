@@ -115,6 +115,7 @@ resolve_port() {
 check_prereqs() {
   command -v mpremote >/dev/null 2>&1 || fail "mpremote is not installed in this environment."
   [ -f "$SOURCE_DIR/main.py" ] || fail "Missing $SOURCE_DIR/main.py"
+  [ -f "$SOURCE_DIR/boot.py" ] || fail "Missing $SOURCE_DIR/boot.py"
   [ -f "$SOURCE_DIR/secrets.py" ] || fail "Create robot/micropython/secrets.py from secrets.example.py first."
 }
 
@@ -128,20 +129,32 @@ main() {
   log "mpremote timeout: ${MPREMOTE_TIMEOUT_SECONDS}s"
   log "If this hangs or fails, first confirm the board is running MicroPython and no other tool has the port open."
 
+  # Use 'resume' to skip soft-reset when entering raw REPL. This avoids
+  # re-running boot.py which re-enumerates USB (dual CDC) and kills the
+  # serial connection mid-operation.
   run_step "Checking raw REPL access on $port" \
-    mpremote connect "$port" fs ls
+    mpremote connect "$port" resume fs ls
+
+  run_step "Installing usb-device-cdc package on Pico" \
+    mpremote connect "$port" resume mip install usb-device-cdc
+
+  run_step "Copying boot.py to the Pico" \
+    mpremote connect "$port" resume fs cp "$SOURCE_DIR/boot.py" :boot.py
 
   run_step "Copying main.py to the Pico" \
-    mpremote connect "$port" fs cp "$SOURCE_DIR/main.py" :main.py
+    mpremote connect "$port" resume fs cp "$SOURCE_DIR/main.py" :main.py
 
   run_step "Copying secrets.py to the Pico" \
-    mpremote connect "$port" fs cp "$SOURCE_DIR/secrets.py" :secrets.py
+    mpremote connect "$port" resume fs cp "$SOURCE_DIR/secrets.py" :secrets.py
 
   run_step "Resetting the Pico so the new code starts" \
-    mpremote connect "$port" reset
+    mpremote connect "$port" resume reset
 
   log "MicroPython files copied successfully."
-  log "Open a serial REPL with: mpremote connect $port repl"
+  log "After reset the Pico exposes two USB serial ports (with VID 2e8a):"
+  log "  First port  = MicroPython REPL (mpremote / interactive use)"
+  log "  Second port = Data channel (used by speech-app for USB communication)"
+  log "Run 'mpremote connect list' to see which /dev/ttyACM* ports belong to the Pico."
 }
 
 main "$@"

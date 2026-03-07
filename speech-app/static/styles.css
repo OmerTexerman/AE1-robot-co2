@@ -140,6 +140,22 @@ button:disabled { opacity: 0.4; }
   white-space: nowrap;
 }
 
+.discovered-usb {
+  border-color: #2e9e5a;
+  background: #f0faf4;
+}
+
+.discovered-usb .use-robot-button {
+  background: #2e9e5a;
+  color: white;
+  border: 1px solid #2e9e5a;
+  border-radius: 5px;
+}
+
+.discovered-usb .use-robot-button:hover {
+  background: #257a48;
+}
+
 .transcript-wrap {
   position: relative;
 }

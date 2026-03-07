@@ -56,6 +56,7 @@ const FONT_SIZES = [14, 16, 18, 20, 24, 28, 32, 40];
 const DEFAULT_FONT_SIZE = 20;
 const DEFAULT_FONT_FAMILY = "Noto Sans";
 const DEFAULT_ROBOT_PORT = 8080;
+const TRANSPORT_SERIAL = "serial";
 
 let mediaRecorder;
 let audioChunks = [];
@@ -554,7 +555,9 @@ function renderRobotState(payload, options = {}) {
 
   if (!payload.paired || !payload.robot) {
     robotConnection.textContent = "No robot paired.";
-    if (!preserveStatus) {
+    if (payload.warning) {
+      robotStatus.textContent = payload.warning;
+    } else if (!preserveStatus) {
       robotStatus.textContent = "Pair the speech app to your Pico 2 W over the current local network.";
     }
     robotMeta.innerHTML = "";
@@ -570,10 +573,13 @@ function renderRobotState(payload, options = {}) {
   if (!preserveStatus) {
     robotStatus.textContent = payload.error || (payload.status ? "Robot status is live." : "Robot is paired.");
   }
+  const endpointLabel = payload.robot.transport === TRANSPORT_SERIAL
+    ? `USB (${escapeHtml(payload.robot.serial_port || payload.robot.host)})`
+    : escapeHtml(payload.robot.base_url);
   robotMeta.innerHTML = `
     <div class="meta-row"><strong>Device:</strong> ${escapeHtml(payload.robot.device_name)}</div>
     <div class="meta-row"><strong>ID:</strong> ${escapeHtml(payload.robot.device_id)}</div>
-    <div class="meta-row"><strong>Endpoint:</strong> ${escapeHtml(payload.robot.base_url)}</div>
+    <div class="meta-row"><strong>Endpoint:</strong> ${endpointLabel}</div>
     <div class="meta-row"><strong>Paired:</strong> ${escapeHtml(new Date(payload.robot.paired_at).toLocaleString())}</div>
   `;
   syncRobotControls();
@@ -588,11 +594,16 @@ function renderDiscoveredRobots(items) {
 
   discoveredRobots.innerHTML = items
     .map(
-      (item) => `
-        <div class="discovered-item">
+      (item) => {
+        const isUsb = Boolean(item.usb);
+        const cssClass = isUsb ? "discovered-item discovered-usb" : "discovered-item";
+        const address = isUsb ? escapeHtml(item.serial_port || item.host) : `${escapeHtml(item.host)}:${escapeHtml(String(item.port))}`;
+        const buttonLabel = isUsb ? "Connect (USB)" : "Use This Robot";
+        return `
+        <div class="${cssClass}">
           <div class="discovered-copy">
             <strong>${escapeHtml(item.device_name)}</strong>
-            <span>${escapeHtml(item.host)}:${escapeHtml(String(item.port))}</span>
+            <span>${address}</span>
           </div>
           <button
             type="button"
@@ -600,11 +611,14 @@ function renderDiscoveredRobots(items) {
             data-robot-host="${escapeHtml(item.host)}"
             data-robot-port="${escapeHtml(String(item.port))}"
             data-robot-name="${escapeHtml(item.device_name)}"
+            data-robot-usb="${isUsb ? "1" : "0"}"
+            data-robot-serial-port="${escapeHtml(item.serial_port || "")}"
           >
-            Use This Robot
+            ${buttonLabel}
           </button>
         </div>
-      `
+      `;
+      }
     )
     .join("");
 }
@@ -679,8 +693,8 @@ async function discoverRobots() {
   }
 }
 
-async function pairRobot() {
-  robotStatus.textContent = "Pairing with robot...";
+async function doPairRequest(body, { pendingMsg, successMsg, failMsg }) {
+  robotStatus.textContent = pendingMsg;
   markRobotStateMutation();
   activeRobotAction = "pair";
   syncRobotControls();
@@ -689,22 +703,37 @@ async function pairRobot() {
     const payload = await fetchJson("/robot/pair", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        host: robotHostInput.value,
-        port: Number(robotPortInput.value || DEFAULT_ROBOT_PORT),
-        pairing_code: robotPairingCodeInput.value,
-        client_name: robotClientNameInput.value,
-      }),
+      body: JSON.stringify(body),
     });
 
-    robotPairingCodeInput.value = "";
     renderRobotState(payload);
-    robotStatus.textContent = payload.connected ? "Pairing complete." : (payload.error || "Pairing saved, but the robot is currently unreachable.");
+    robotStatus.textContent = payload.connected ? successMsg : (payload.error || failMsg);
+    return payload;
   } catch (error) {
-    robotStatus.textContent = error.message || "Pairing failed.";
+    robotStatus.textContent = error.message || failMsg;
+    return null;
   } finally {
     activeRobotAction = null;
     syncRobotControls();
+  }
+}
+
+async function pairRobot() {
+  const payload = await doPairRequest(
+    {
+      host: robotHostInput.value,
+      port: Number(robotPortInput.value || DEFAULT_ROBOT_PORT),
+      pairing_code: robotPairingCodeInput.value,
+      client_name: robotClientNameInput.value,
+    },
+    {
+      pendingMsg: "Pairing with robot...",
+      successMsg: "Pairing complete.",
+      failMsg: "Pairing saved, but the robot is currently unreachable.",
+    },
+  );
+  if (payload) {
+    robotPairingCodeInput.value = "";
   }
 }
 
@@ -960,9 +989,25 @@ transcriptFontTrigger.addEventListener("click", () => {
   );
 });
 
-discoveredRobots.addEventListener("click", (event) => {
+discoveredRobots.addEventListener("click", async (event) => {
   const button = event.target.closest(".use-robot-button");
   if (!button) {
+    return;
+  }
+
+  if (button.dataset.robotUsb === "1") {
+    await doPairRequest(
+      {
+        transport: TRANSPORT_SERIAL,
+        serial_port: button.dataset.robotSerialPort,
+        client_name: robotClientNameInput.value || "speech-app",
+      },
+      {
+        pendingMsg: "Connecting via USB...",
+        successMsg: "USB robot connected.",
+        failMsg: "USB pairing saved, but robot is unreachable.",
+      },
+    );
     return;
   }
 

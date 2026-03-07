@@ -4,7 +4,11 @@
     "dockerfile": "../../speech-app/Dockerfile",
     "context": "../../speech-app"
   },
-  "runArgs": ["--network=host"],
+  "runArgs": [
+    "--privileged",
+    "--network=host",
+    "--volume=/dev:/dev"
+  ],
   "forwardPorts": [8000],
   "postCreateCommand": "cd speech-app && pip install -r requirements.txt"
 }
