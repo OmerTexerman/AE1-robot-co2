@@ -1,0 +1,18 @@
+services:
+  speech-app:
+    build: ./speech-app
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./speech-app/.env
+    network_mode: host
+    volumes:
+      - whisper-models:/root/.cache/huggingface
+
+  mock-robot:
+    build: ./robot/mock
+    ports:
+      - "8080:8080"
+
+volumes:
+  whisper-models:
