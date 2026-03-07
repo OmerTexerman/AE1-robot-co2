@@ -241,6 +241,7 @@ def generate_write_toolpath(
     return {
         "mode": "write",
         "render_mode": render_mode,
+        "pen_tip_mm": pen_tip_mm,
         "operations": operations,
         "paper": {"width": paper_w, "height": paper_h},
         "margins": margins,

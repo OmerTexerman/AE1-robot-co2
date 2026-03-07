@@ -1184,6 +1184,9 @@ function startPreviewAnimation(data) {
   let totalLength = 0;
   for (const seg of segments) totalLength += Math.max(seg.length, 0.5);
 
+  const penTipMm = data.pen_tip_mm || 0;
+  const penTipPx = penTipMm * scale;
+
   const state = {
     segments,
     currentSegIndex: 0,
@@ -1198,6 +1201,7 @@ function startPreviewAnimation(data) {
     margins: data.margins || { top: 10, right: 10, bottom: 10, left: 10 },
     toCanvas,
     totalLength,
+    penTipPx,
     // Track completed items for persistent rendering
     completedOps: [],
     toolheadPos: null,
@@ -1322,13 +1326,28 @@ function drawFrame(ctx, canvas, state) {
   ctx.strokeRect(mx0, my0, mx1 - mx0, my1 - my0);
   ctx.setLineDash([]);
 
-  // Draw completed operations
+  // --- Ink layer: shows expected pen output on paper ---
+  if (state.penTipPx > 0.5) {
+    for (const op of state.completedOps) {
+      if (op.type === "draw") drawInkPath(ctx, state, op.points);
+      else if (op.type === "punch") drawPunchPoint(ctx, state, op.point);
+    }
+    if (!state.done && state.currentSegIndex < state.segments.length) {
+      const seg = state.segments[state.currentSegIndex];
+      if (seg.type === "draw" && seg.length > 0) {
+        const frac = state.currentSegProgress / seg.length;
+        drawInkPath(ctx, state, getPartialPath(seg.points, frac));
+      }
+    }
+  }
+
+  // --- Toolpath layer: shows pen movement ---
   for (const op of state.completedOps) {
     if (op.type === "travel") {
       drawTravelPath(ctx, state, op.points);
     } else if (op.type === "draw") {
       drawDrawPath(ctx, state, op.points);
-    } else if (op.type === "punch") {
+    } else if (op.type === "punch" && !(state.penTipPx > 0.5)) {
       drawPunchPoint(ctx, state, op.point);
     }
   }
@@ -1415,9 +1434,33 @@ function drawDrawPath(ctx, state, points) {
     const [x, y] = state.toCanvas(points[i][0], points[i][1]);
     ctx.lineTo(x, y);
   }
-  ctx.strokeStyle = "#222";
-  ctx.lineWidth = 1.2;
+  // If ink layer is visible, draw toolpath as a subtle colored line
+  if (state.penTipPx > 0.5) {
+    ctx.strokeStyle = "rgba(220, 50, 50, 0.5)";
+    ctx.lineWidth = 0.8;
+  } else {
+    ctx.strokeStyle = "#222";
+    ctx.lineWidth = 1.2;
+  }
   ctx.stroke();
+}
+
+function drawInkPath(ctx, state, points) {
+  if (points.length < 2) return;
+  ctx.beginPath();
+  const [sx, sy] = state.toCanvas(points[0][0], points[0][1]);
+  ctx.moveTo(sx, sy);
+  for (let i = 1; i < points.length; i++) {
+    const [x, y] = state.toCanvas(points[i][0], points[i][1]);
+    ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = "rgba(30, 30, 30, 0.25)";
+  ctx.lineWidth = state.penTipPx;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.stroke();
+  ctx.lineCap = "butt";
+  ctx.lineJoin = "miter";
 }
 
 function drawPunchPoint(ctx, state, point) {
@@ -1451,10 +1494,12 @@ function skipPreviewAnimation() {
   const oY = padding + (canvas.height - 2 * padding - paper.height * scale) / 2;
   function toCanvas(x, y) { return [oX + x * scale, oY + y * scale]; }
 
+  const penTipMm = data.pen_tip_mm || 0;
   const finalState = {
     toCanvas,
     paper,
     margins: data.margins || { top: 10, right: 10, bottom: 10, left: 10 },
+    penTipPx: penTipMm * scale,
     completedOps: (data.operations || []).map((op) => ({ ...op })),
     done: true,
     toolheadPos: null,
