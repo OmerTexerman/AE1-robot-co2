@@ -25,6 +25,30 @@ const fontPickerPanel = document.getElementById("fontPickerPanel");
 const fontPickerSearch = document.getElementById("fontPickerSearch");
 const fontPickerList = document.getElementById("fontPickerList");
 
+const previewModal = document.getElementById("previewModal");
+const previewModalClose = document.getElementById("previewModalClose");
+const previewCanvas = document.getElementById("previewCanvas");
+const previewPaperSize = document.getElementById("previewPaperSize");
+const customPaperFields = document.getElementById("customPaperFields");
+const previewPaperWidth = document.getElementById("previewPaperWidth");
+const previewPaperHeight = document.getElementById("previewPaperHeight");
+const previewRenderMode = document.getElementById("previewRenderMode");
+const previewFontSize = document.getElementById("previewFontSize");
+const previewPenTip = document.getElementById("previewPenTip");
+const previewMarginTop = document.getElementById("previewMarginTop");
+const previewMarginRight = document.getElementById("previewMarginRight");
+const previewMarginBottom = document.getElementById("previewMarginBottom");
+const previewMarginLeft = document.getElementById("previewMarginLeft");
+const previewOffsetX = document.getElementById("previewOffsetX");
+const previewOffsetY = document.getElementById("previewOffsetY");
+const previewFontTrigger = document.getElementById("previewFontTrigger");
+const previewFontValue = document.getElementById("previewFontValue");
+const previewStats = document.getElementById("previewStats");
+const previewPlayPause = document.getElementById("previewPlayPause");
+const previewRestart = document.getElementById("previewRestart");
+const previewSkip = document.getElementById("previewSkip");
+const previewSpeed = document.getElementById("previewSpeed");
+
 const DEFAULT_TRANSCRIPT_TEXT = "Your text will appear here.";
 const HISTORY_STORAGE_KEY = "speechAppTranscriptHistory";
 const HISTORY_LIMIT = 12;
@@ -202,6 +226,8 @@ function normalizeHistoryItem(item) {
   }
 
   const fs = Number(item.font_size);
+  const ag = Array.isArray(item.available_grades) ? item.available_grades : [];
+  const bg = item.braille_grade;
   return {
     id: typeof item.id === "string" && item.id ? item.id : historyItemId(),
     text,
@@ -213,6 +239,8 @@ function normalizeHistoryItem(item) {
     language: typeof item.language === "string" ? item.language : "",
     language_confidence: item.language_confidence ?? null,
     created_at: typeof item.created_at === "string" && item.created_at ? item.created_at : new Date().toISOString(),
+    available_grades: ag,
+    braille_grade: bg === "off" || bg === 1 || bg === 2 ? bg : "off",
   };
 }
 
@@ -254,34 +282,62 @@ function closeFontPicker() {
   activeFontPicker = null;
 }
 
-function renderFontList(fonts, selectedFamily) {
-  if (!fonts.length) {
+function renderFontList(fonts, selectedFamily, { hersheyFonts = [] } = {}) {
+  let html = "";
+
+  // Hershey fonts section (if provided)
+  if (hersheyFonts.length) {
+    html += '<div class="font-picker-group-label">Single-stroke (Hershey)</div>';
+    html += hersheyFonts
+      .map(
+        (name) =>
+          `<div class="font-picker-item${name === selectedFamily ? " selected" : ""}" data-family="${escapeHtml(name)}" data-hershey="1">${escapeHtml(name)}</div>`
+      )
+      .join("");
+    if (fonts.length) {
+      html += '<div class="font-picker-group-label">Google Fonts</div>';
+    }
+  }
+
+  if (!fonts.length && !hersheyFonts.length) {
     fontPickerList.innerHTML = '<div class="font-picker-empty">No fonts found</div>';
     return;
   }
-  fontPickerList.innerHTML = fonts
+
+  html += fonts
     .map(
       (f) =>
         `<div class="font-picker-item${f.family === selectedFamily ? " selected" : ""}" data-family="${escapeHtml(f.family)}">${escapeHtml(f.family)}</div>`
     )
     .join("");
+
+  fontPickerList.innerHTML = html;
 }
 
-async function openFontPicker(triggerEl, subset, currentFamily, onSelect) {
+async function openFontPicker(triggerEl, subset, currentFamily, onSelect, { hersheyFonts = [] } = {}) {
   if (activeFontPicker && activeFontPicker.triggerEl === triggerEl) {
     closeFontPicker();
     return;
   }
 
-  activeFontPicker = { triggerEl, subset, currentFamily, onSelect };
+  activeFontPicker = { triggerEl, subset, currentFamily, onSelect, hersheyFonts };
   fontPickerSearch.value = "";
   fontPickerList.innerHTML = '<div class="font-picker-empty">Loading...</div>';
   fontPickerPanel.classList.add("open");
 
-  // position near the trigger
+  // Position near the trigger. Use fixed positioning inside modals so
+  // the picker doesn't scroll away; absolute everywhere else.
+  const inModal = !!triggerEl.closest(".modal-overlay");
   const rect = triggerEl.getBoundingClientRect();
-  fontPickerPanel.style.top = (rect.bottom + window.scrollY + 4) + "px";
-  fontPickerPanel.style.left = rect.left + "px";
+  if (inModal) {
+    fontPickerPanel.style.position = "fixed";
+    fontPickerPanel.style.top = (rect.bottom + 4) + "px";
+    fontPickerPanel.style.left = rect.left + "px";
+  } else {
+    fontPickerPanel.style.position = "absolute";
+    fontPickerPanel.style.top = (rect.bottom + window.scrollY + 4) + "px";
+    fontPickerPanel.style.left = rect.left + "px";
+  }
 
   fontPickerSearch.focus();
 
@@ -292,7 +348,7 @@ async function openFontPicker(triggerEl, subset, currentFamily, onSelect) {
     fonts.unshift({ family: currentFamily, category: "" });
   }
   activeFontPicker.allFonts = fonts;
-  renderFontList(fonts, currentFamily);
+  renderFontList(fonts, currentFamily, { hersheyFonts });
 }
 
 function filterFontList() {
@@ -301,7 +357,11 @@ function filterFontList() {
   const filtered = q
     ? activeFontPicker.allFonts.filter((f) => f.family.toLowerCase().includes(q))
     : activeFontPicker.allFonts;
-  renderFontList(filtered, activeFontPicker.currentFamily);
+  const hershey = activeFontPicker.hersheyFonts || [];
+  const filteredHershey = q
+    ? hershey.filter((name) => name.toLowerCase().includes(q))
+    : hershey;
+  renderFontList(filtered, activeFontPicker.currentFamily, { hersheyFonts: filteredHershey });
 }
 
 fontPickerSearch.addEventListener("input", filterFontList);
@@ -432,7 +492,11 @@ function renderHistory(items) {
               <span class="font-trigger-label">${escapeHtml(i.font_family)}</span>
               <span class="font-trigger-arrow">&#9662;</span>
             </button>
-            <button type="button" class="braille-toggle" data-history-id="${escapeHtml(i.id)}">Braille</button>
+            <select class="braille-picker" data-history-id="${escapeHtml(i.id)}">
+              <option value="off"${i.braille_grade === "off" ? " selected" : ""}>Braille Off</option>
+              ${!(i.available_grades || []).length || (i.available_grades || []).includes(1) ? `<option value="1"${i.braille_grade === 1 ? " selected" : ""}>Grade 1</option>` : ""}
+              ${!(i.available_grades || []).length || (i.available_grades || []).includes(2) ? `<option value="2"${i.braille_grade === 2 ? " selected" : ""}>Grade 2</option>` : ""}
+            </select>
           </div>
         </div>
         <div class="history-actions">
@@ -672,19 +736,20 @@ async function sendTranscriptPayloadToRobot(transcriptToSend) {
     return;
   }
 
-  robotStatus.textContent = brailleActive()
+  const isBraille = itemBrailleActive(transcriptToSend);
+  robotStatus.textContent = isBraille
     ? "Sending Braille to robot..."
     : "Sending transcript to robot...";
   activeRobotAction = "render";
   syncRobotControls();
 
   try {
-    const renderBody = brailleActive()
+    const renderBody = isBraille
       ? {
           mode: "braille",
           text: transcriptToSend.text,
           language: transcriptToSend.language,
-          grade: brailleGrade(),
+          grade: Number(transcriptToSend.braille_grade),
         }
       : {
           mode: "write",
@@ -699,7 +764,7 @@ async function sendTranscriptPayloadToRobot(transcriptToSend) {
       body: JSON.stringify(renderBody),
     });
 
-    robotStatus.textContent = brailleActive()
+    robotStatus.textContent = isBraille
       ? `Robot accepted Braille job ${payload.job_id}.`
       : `Robot accepted job ${payload.job_id}.`;
   } catch (error) {
@@ -785,7 +850,7 @@ historyList.addEventListener("click", (event) => {
   const sendButton = event.target.closest(".history-send-button");
   if (sendButton) {
     const historyItem = findTranscriptInHistory(sendButton.dataset.historyId || "");
-    if (historyItem) sendTranscriptPayloadToRobot(historyItem);
+    if (historyItem) handleSendToRobot(historyItem);
     return;
   }
 
@@ -795,33 +860,8 @@ historyList.addEventListener("click", (event) => {
     return;
   }
 
-  const brailleBtn = event.target.closest(".braille-toggle[data-history-id]");
-  if (brailleBtn) {
-    const id = brailleBtn.dataset.historyId || "";
-    const item = findTranscriptInHistory(id);
-    if (!item) return;
-    const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
-    if (!textEl) return;
+  // Braille picker is handled in the "change" listener below
 
-    if (brailleBtn.classList.contains("active")) {
-      // Restore original text
-      brailleBtn.classList.remove("active");
-      textEl.textContent = item.text;
-      textEl.style.fontFamily = cssFontFamily(item.font_family);
-    } else {
-      // Fetch and show Braille preview
-      brailleBtn.disabled = true;
-      fetchBraillePreview(item.text, item.language, brailleGrade())
-        .then((brailleText) => {
-          brailleBtn.classList.add("active");
-          textEl.textContent = brailleText;
-          textEl.style.fontFamily = "";
-        })
-        .catch(() => {})
-        .finally(() => { brailleBtn.disabled = false; });
-    }
-    return;
-  }
 
   const trigger = event.target.closest(".font-trigger[data-history-id]");
   if (trigger) {
@@ -836,16 +876,55 @@ historyList.addEventListener("click", (event) => {
 
 historyList.addEventListener("change", (event) => {
   const picker = event.target.closest(".size-picker[data-history-id]");
-  if (!picker) return;
-  const id = picker.dataset.historyId || "";
-  const size = Number(picker.value);
-  const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
-  if (textEl) textEl.style.fontSize = size + "px";
-  if (currentTranscriptId === id) {
-    transcript.style.fontSize = size + "px";
-    transcriptSizePicker.value = String(size);
+  if (picker) {
+    const id = picker.dataset.historyId || "";
+    const size = Number(picker.value);
+    const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
+    if (textEl) textEl.style.fontSize = size + "px";
+    if (currentTranscriptId === id) {
+      transcript.style.fontSize = size + "px";
+      transcriptSizePicker.value = String(size);
+    }
+    updateHistoryItem(id, { font_size: size });
+    return;
   }
-  updateHistoryItem(id, { font_size: size });
+
+  const braillePicker = event.target.closest(".braille-picker[data-history-id]");
+  if (braillePicker) {
+    const id = braillePicker.dataset.historyId || "";
+    const item = findTranscriptInHistory(id);
+    if (!item) return;
+    const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
+    if (!textEl) return;
+    const val = braillePicker.value;
+    const grade = val === "off" ? "off" : Number(val);
+    updateHistoryItem(id, { braille_grade: grade });
+
+    if (grade === "off") {
+      textEl.textContent = item.text;
+      textEl.style.fontFamily = cssFontFamily(item.font_family);
+    } else {
+      braillePicker.disabled = true;
+      fetchBraillePreview(item.text, item.language, grade)
+        .then((brailleText) => {
+          textEl.textContent = brailleText;
+          textEl.style.fontFamily = "";
+        })
+        .catch(() => {})
+        .finally(() => { braillePicker.disabled = false; });
+    }
+
+    // Sync the top-level braille selector if this is the current transcript
+    if (currentTranscriptId === id) {
+      brailleSelect.value = String(grade === "off" ? "off" : grade);
+      if (grade === "off") {
+        restoreBraillePreview();
+      } else {
+        applyBraillePreview();
+      }
+    }
+    return;
+  }
 });
 
 transcriptSizePicker.addEventListener("change", () => {
@@ -909,7 +988,643 @@ brailleSelect.addEventListener("change", () => {
   } else {
     restoreBraillePreview();
   }
+  // Sync to current transcript's history item and history braille picker
+  if (currentTranscriptId) {
+    const grade = brailleActive() ? brailleGrade() : "off";
+    updateHistoryItem(currentTranscriptId, { braille_grade: grade });
+    const historyBraille = historyList.querySelector(`.braille-picker[data-history-id="${currentTranscriptId}"]`);
+    if (historyBraille) historyBraille.value = String(grade === "off" ? "off" : grade);
+  }
 });
+
+// ── Preview Modal ──
+
+let previewAnimationState = null;
+let previewDebounceTimer = null;
+let currentPreviewData = null;
+let cachedPaperSizes = null;
+let previewTranscriptItem = null;
+
+let cachedHersheyFonts = null;
+
+async function loadHersheyFonts() {
+  if (cachedHersheyFonts) return cachedHersheyFonts;
+  try {
+    const data = await fetchJson("/hershey-fonts");
+    cachedHersheyFonts = data.fonts || [];
+  } catch {
+    cachedHersheyFonts = [];
+  }
+  return cachedHersheyFonts;
+}
+
+function isHersheyFont(fontFamily) {
+  return cachedHersheyFonts && cachedHersheyFonts.includes(fontFamily);
+}
+
+function updateRenderModeForFont() {
+  const selected = previewFontValue.value;
+  if (isHersheyFont(selected)) {
+    previewRenderMode.disabled = true;
+    previewRenderMode.value = "outline";
+    previewRenderMode.title = "Hershey fonts are already single-stroke";
+  } else {
+    previewRenderMode.disabled = false;
+    previewRenderMode.title = "";
+  }
+}
+
+function setPreviewFont(family) {
+  previewFontValue.value = family;
+  const label = previewFontTrigger.querySelector(".font-trigger-label");
+  if (label) label.textContent = family;
+  updateRenderModeForFont();
+  debouncedRefreshPreview();
+}
+
+async function loadPaperSizes() {
+  if (cachedPaperSizes) return;
+  try {
+    const [paperData] = await Promise.all([
+      fetchJson("/paper-sizes"),
+      loadHersheyFonts(),
+    ]);
+    cachedPaperSizes = paperData;
+    previewPaperSize.innerHTML = "";
+    for (const size of paperData.sizes) {
+      const opt = document.createElement("option");
+      opt.value = size.name;
+      opt.textContent = `${size.name} (${size.width} x ${size.height} mm)`;
+      previewPaperSize.appendChild(opt);
+    }
+    const customOpt = document.createElement("option");
+    customOpt.value = "Custom";
+    customOpt.textContent = "Custom...";
+    previewPaperSize.appendChild(customOpt);
+
+    if (paperData.defaults) {
+      previewFontSize.value = paperData.defaults.font_size_mm;
+      previewPenTip.value = paperData.defaults.pen_tip_mm;
+      previewMarginTop.value = paperData.defaults.margins.top;
+      previewMarginRight.value = paperData.defaults.margins.right;
+      previewMarginBottom.value = paperData.defaults.margins.bottom;
+      previewMarginLeft.value = paperData.defaults.margins.left;
+      previewOffsetX.value = paperData.defaults.paper_offset.x;
+      previewOffsetY.value = paperData.defaults.paper_offset.y;
+    }
+  } catch {
+    previewPaperSize.innerHTML = '<option value="A4">A4 (210 x 297 mm)</option>';
+  }
+}
+
+function getPreviewParams(item) {
+  const params = {
+    text: item.text,
+    paper_size: previewPaperSize.value,
+    margins: {
+      top: Number(previewMarginTop.value) || 10,
+      right: Number(previewMarginRight.value) || 10,
+      bottom: Number(previewMarginBottom.value) || 10,
+      left: Number(previewMarginLeft.value) || 10,
+    },
+    paper_offset: {
+      x: Number(previewOffsetX.value) || 0,
+      y: Number(previewOffsetY.value) || 0,
+    },
+  };
+
+  if (previewPaperSize.value === "Custom") {
+    params.paper_width = Number(previewPaperWidth.value) || 210;
+    params.paper_height = Number(previewPaperHeight.value) || 297;
+  }
+
+  if (itemBrailleActive(item)) {
+    params.mode = "braille";
+    params.language = item.language || "en";
+    params.grade = Number(item.braille_grade);
+  } else {
+    params.mode = "write";
+    params.font_family = previewFontValue.value || item.font_family;
+    params.font_size_mm = Number(previewFontSize.value) || 5;
+    params.pen_tip_mm = Number(previewPenTip.value) || 0.7;
+    params.render_mode = previewRenderMode.value;
+  }
+
+  return params;
+}
+
+async function fetchPreview(item) {
+  const params = getPreviewParams(item);
+  previewStats.textContent = "Generating preview...";
+  try {
+    const data = await fetchJson("/toolpath/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    currentPreviewData = data;
+    renderPreviewStats(data);
+    startPreviewAnimation(data);
+  } catch (err) {
+    previewStats.textContent = err.message || "Preview failed.";
+    currentPreviewData = null;
+  }
+}
+
+function renderPreviewStats(data) {
+  if (!data || !data.stats) {
+    previewStats.textContent = "";
+    return;
+  }
+  const s = data.stats;
+  if (data.mode === "braille") {
+    previewStats.textContent = `Punches: ${s.punch_count} | Travel: ${s.travel_distance_mm}mm`;
+  } else {
+    previewStats.textContent = `Paths: ${s.draw_count} | Draw: ${s.draw_distance_mm}mm | Travel: ${s.travel_distance_mm}mm`;
+  }
+}
+
+// ── Animated Canvas Rendering ──
+
+function startPreviewAnimation(data) {
+  stopPreviewAnimation();
+
+  const canvas = previewCanvas;
+  const ctx = canvas.getContext("2d");
+  const paper = data.paper;
+
+  // Scale to fit canvas with padding
+  const padding = 20;
+  const scaleX = (canvas.width - 2 * padding) / paper.width;
+  const scaleY = (canvas.height - 2 * padding) / paper.height;
+  const scale = Math.min(scaleX, scaleY);
+  const offsetX = padding + (canvas.width - 2 * padding - paper.width * scale) / 2;
+  const offsetY = padding + (canvas.height - 2 * padding - paper.height * scale) / 2;
+
+  function toCanvas(x, y) {
+    return [offsetX + x * scale, offsetY + y * scale];
+  }
+
+  // Flatten all operations into segments for animation
+  const ops = data.operations || [];
+  const segments = [];
+  for (const op of ops) {
+    if (op.type === "travel" || op.type === "draw") {
+      const pts = op.points || [];
+      let totalLen = 0;
+      for (let i = 1; i < pts.length; i++) {
+        totalLen += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      }
+      segments.push({ type: op.type, points: pts, length: totalLen });
+    } else if (op.type === "punch") {
+      segments.push({ type: "punch", point: op.point, length: 0 });
+    }
+  }
+
+  let totalLength = 0;
+  for (const seg of segments) totalLength += Math.max(seg.length, 0.5);
+
+  const state = {
+    segments,
+    currentSegIndex: 0,
+    currentSegProgress: 0,
+    playing: true,
+    speed: Number(previewSpeed.value) || 5,
+    done: false,
+    scale,
+    offsetX,
+    offsetY,
+    paper,
+    margins: data.margins || { top: 10, right: 10, bottom: 10, left: 10 },
+    toCanvas,
+    totalLength,
+    // Track completed items for persistent rendering
+    completedOps: [],
+    toolheadPos: null,
+    animFrameId: null,
+    lastTime: null,
+    pixelsPerMs: 0.15,  // base animation speed in mm/ms
+  };
+
+  previewAnimationState = state;
+  previewPlayPause.textContent = "\u23F8";
+
+  function animate(timestamp) {
+    if (!state.playing || state.done) {
+      state.animFrameId = null;
+      return;
+    }
+
+    if (!state.lastTime) state.lastTime = timestamp;
+    const dt = timestamp - state.lastTime;
+    state.lastTime = timestamp;
+
+    const advanceMm = state.pixelsPerMs * state.speed * dt;
+    advanceAnimation(state, advanceMm);
+    drawFrame(ctx, canvas, state);
+
+    if (!state.done) {
+      state.animFrameId = requestAnimationFrame(animate);
+    }
+  }
+
+  drawFrame(ctx, canvas, state);
+  state.animFrameId = requestAnimationFrame(animate);
+}
+
+function advanceAnimation(state, advanceMm) {
+  let remaining = advanceMm;
+
+  while (remaining > 0 && state.currentSegIndex < state.segments.length) {
+    const seg = state.segments[state.currentSegIndex];
+
+    if (seg.type === "punch") {
+      state.completedOps.push({ ...seg });
+      state.toolheadPos = seg.point;
+      state.currentSegIndex++;
+      state.currentSegProgress = 0;
+      remaining -= 0.5;
+      continue;
+    }
+
+    const segLen = seg.length || 0.01;
+    const progressNeeded = segLen - state.currentSegProgress;
+
+    if (remaining >= progressNeeded) {
+      remaining -= progressNeeded;
+      state.completedOps.push({
+        type: seg.type,
+        points: seg.points,
+      });
+      state.toolheadPos = seg.points[seg.points.length - 1];
+      state.currentSegIndex++;
+      state.currentSegProgress = 0;
+    } else {
+      state.currentSegProgress += remaining;
+      // Find interpolated position
+      state.toolheadPos = interpolateAlongPath(seg.points, state.currentSegProgress / segLen);
+      remaining = 0;
+    }
+  }
+
+  if (state.currentSegIndex >= state.segments.length) {
+    state.done = true;
+    previewPlayPause.textContent = "\u25B6";
+  }
+}
+
+function interpolateAlongPath(points, fraction) {
+  if (points.length < 2) return points[0] || [0, 0];
+  fraction = Math.max(0, Math.min(1, fraction));
+
+  let totalLen = 0;
+  for (let i = 1; i < points.length; i++) {
+    totalLen += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+  }
+
+  let target = fraction * totalLen;
+  let accumulated = 0;
+
+  for (let i = 1; i < points.length; i++) {
+    const segLen = Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+    if (accumulated + segLen >= target) {
+      const t = segLen > 0 ? (target - accumulated) / segLen : 0;
+      return [
+        points[i - 1][0] + t * (points[i][0] - points[i - 1][0]),
+        points[i - 1][1] + t * (points[i][1] - points[i - 1][1]),
+      ];
+    }
+    accumulated += segLen;
+  }
+
+  return points[points.length - 1];
+}
+
+function drawFrame(ctx, canvas, state) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const { toCanvas, paper, margins } = state;
+
+  // Draw paper
+  const [px0, py0] = toCanvas(0, 0);
+  const [px1, py1] = toCanvas(paper.width, paper.height);
+  ctx.fillStyle = "white";
+  ctx.fillRect(px0, py0, px1 - px0, py1 - py0);
+  ctx.strokeStyle = "#999";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(px0, py0, px1 - px0, py1 - py0);
+
+  // Draw margin guides (dashed)
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = "#ccc";
+  ctx.lineWidth = 0.5;
+  const [mx0, my0] = toCanvas(margins.left, margins.top);
+  const [mx1, my1] = toCanvas(paper.width - margins.right, paper.height - margins.bottom);
+  ctx.strokeRect(mx0, my0, mx1 - mx0, my1 - my0);
+  ctx.setLineDash([]);
+
+  // Draw completed operations
+  for (const op of state.completedOps) {
+    if (op.type === "travel") {
+      drawTravelPath(ctx, state, op.points);
+    } else if (op.type === "draw") {
+      drawDrawPath(ctx, state, op.points);
+    } else if (op.type === "punch") {
+      drawPunchPoint(ctx, state, op.point);
+    }
+  }
+
+  // Draw current in-progress segment
+  if (!state.done && state.currentSegIndex < state.segments.length) {
+    const seg = state.segments[state.currentSegIndex];
+    if ((seg.type === "travel" || seg.type === "draw") && seg.length > 0) {
+      const frac = state.currentSegProgress / seg.length;
+      const partialPoints = getPartialPath(seg.points, frac);
+      if (seg.type === "travel") {
+        drawTravelPath(ctx, state, partialPoints);
+      } else {
+        drawDrawPath(ctx, state, partialPoints);
+      }
+    }
+  }
+
+  // Draw toolhead
+  if (state.toolheadPos) {
+    const [tx, ty] = toCanvas(state.toolheadPos[0], state.toolheadPos[1]);
+    ctx.beginPath();
+    ctx.arc(tx, ty, 4, 0, 2 * Math.PI);
+    ctx.fillStyle = "#e53935";
+    ctx.fill();
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+function getPartialPath(points, fraction) {
+  if (points.length < 2 || fraction <= 0) return [points[0]];
+  if (fraction >= 1) return points;
+
+  let totalLen = 0;
+  for (let i = 1; i < points.length; i++) {
+    totalLen += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+  }
+
+  const target = fraction * totalLen;
+  let accumulated = 0;
+  const result = [points[0]];
+
+  for (let i = 1; i < points.length; i++) {
+    const segLen = Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+    if (accumulated + segLen >= target) {
+      const t = segLen > 0 ? (target - accumulated) / segLen : 0;
+      result.push([
+        points[i - 1][0] + t * (points[i][0] - points[i - 1][0]),
+        points[i - 1][1] + t * (points[i][1] - points[i - 1][1]),
+      ]);
+      return result;
+    }
+    accumulated += segLen;
+    result.push(points[i]);
+  }
+
+  return result;
+}
+
+function drawTravelPath(ctx, state, points) {
+  if (points.length < 2) return;
+  ctx.beginPath();
+  const [sx, sy] = state.toCanvas(points[0][0], points[0][1]);
+  ctx.moveTo(sx, sy);
+  for (let i = 1; i < points.length; i++) {
+    const [x, y] = state.toCanvas(points[i][0], points[i][1]);
+    ctx.lineTo(x, y);
+  }
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = "rgba(150, 150, 150, 0.4)";
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawDrawPath(ctx, state, points) {
+  if (points.length < 2) return;
+  ctx.beginPath();
+  const [sx, sy] = state.toCanvas(points[0][0], points[0][1]);
+  ctx.moveTo(sx, sy);
+  for (let i = 1; i < points.length; i++) {
+    const [x, y] = state.toCanvas(points[i][0], points[i][1]);
+    ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = "#222";
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+}
+
+function drawPunchPoint(ctx, state, point) {
+  const [x, y] = state.toCanvas(point[0], point[1]);
+  ctx.beginPath();
+  ctx.arc(x, y, 3, 0, 2 * Math.PI);
+  ctx.fillStyle = "#1a73e8";
+  ctx.fill();
+}
+
+function stopPreviewAnimation() {
+  if (previewAnimationState?.animFrameId) {
+    cancelAnimationFrame(previewAnimationState.animFrameId);
+  }
+  previewAnimationState = null;
+}
+
+function skipPreviewAnimation() {
+  if (!previewAnimationState || !currentPreviewData) return;
+  stopPreviewAnimation();
+  // Render final state instantly
+  const canvas = previewCanvas;
+  const ctx = canvas.getContext("2d");
+  const data = currentPreviewData;
+  const paper = data.paper;
+  const padding = 20;
+  const scaleX = (canvas.width - 2 * padding) / paper.width;
+  const scaleY = (canvas.height - 2 * padding) / paper.height;
+  const scale = Math.min(scaleX, scaleY);
+  const oX = padding + (canvas.width - 2 * padding - paper.width * scale) / 2;
+  const oY = padding + (canvas.height - 2 * padding - paper.height * scale) / 2;
+  function toCanvas(x, y) { return [oX + x * scale, oY + y * scale]; }
+
+  const finalState = {
+    toCanvas,
+    paper,
+    margins: data.margins || { top: 10, right: 10, bottom: 10, left: 10 },
+    completedOps: (data.operations || []).map((op) => ({ ...op })),
+    done: true,
+    toolheadPos: null,
+    segments: [],
+    currentSegIndex: 0,
+    currentSegProgress: 0,
+  };
+
+  // Find last position
+  const ops = data.operations || [];
+  for (let i = ops.length - 1; i >= 0; i--) {
+    if (ops[i].type === "punch") {
+      finalState.toolheadPos = ops[i].point;
+      break;
+    }
+    if (ops[i].type === "draw" || ops[i].type === "travel") {
+      const pts = ops[i].points;
+      finalState.toolheadPos = pts[pts.length - 1];
+      break;
+    }
+  }
+
+  previewAnimationState = finalState;
+  drawFrame(ctx, canvas, finalState);
+  previewPlayPause.textContent = "\u25B6";
+}
+
+function pxToMm(px) {
+  // Convert CSS px to physical mm for robot writing.
+  // At 96 DPI, 1px = 0.2646mm. We use 0.25 for a clean mapping:
+  // 14px -> 3.5mm, 20px -> 5mm, 40px -> 10mm
+  return Math.round(px * 0.25 * 2) / 2; // round to nearest 0.5
+}
+
+function itemBrailleActive(item) {
+  return item.braille_grade !== "off" && item.braille_grade != null;
+}
+
+function openPreviewModal(item) {
+  previewTranscriptItem = item;
+  previewModal.style.display = "";
+
+  const isBraille = itemBrailleActive(item);
+
+  // Sync font size from transcript item
+  if (item.font_size) {
+    previewFontSize.value = pxToMm(item.font_size);
+  }
+
+  // Set up font trigger for modal
+  const fontLabel = previewFontTrigger.closest("label");
+  if (isBraille) {
+    if (fontLabel) fontLabel.style.display = "none";
+  } else {
+    if (fontLabel) fontLabel.style.display = "";
+    setPreviewFont(item.font_family);
+    previewFontTrigger.dataset.subset = item.script || "latin";
+  }
+
+  // Hide render mode selector for braille
+  const renderModeLabel = previewRenderMode.closest("label");
+  const fontSizeLabel = previewFontSize.closest("label");
+  const penTipLabel = previewPenTip.closest("label");
+  if (isBraille) {
+    if (renderModeLabel) renderModeLabel.style.display = "none";
+    if (fontSizeLabel) fontSizeLabel.style.display = "none";
+    if (penTipLabel) penTipLabel.style.display = "none";
+  } else {
+    if (renderModeLabel) renderModeLabel.style.display = "";
+    if (fontSizeLabel) fontSizeLabel.style.display = "";
+    if (penTipLabel) penTipLabel.style.display = "";
+  }
+
+  fetchPreview(item);
+}
+
+function closePreviewModal() {
+  previewModal.style.display = "none";
+  stopPreviewAnimation();
+  currentPreviewData = null;
+  previewTranscriptItem = null;
+}
+
+function debouncedRefreshPreview() {
+  if (!previewTranscriptItem) return;
+  clearTimeout(previewDebounceTimer);
+  previewDebounceTimer = setTimeout(() => {
+    fetchPreview(previewTranscriptItem);
+  }, 300);
+}
+
+// Modal event listeners
+previewModalClose.addEventListener("click", closePreviewModal);
+previewModal.addEventListener("click", (e) => {
+  if (e.target === previewModal) closePreviewModal();
+});
+
+previewPlayPause.addEventListener("click", () => {
+  if (!previewAnimationState) return;
+  if (previewAnimationState.done) {
+    // Restart
+    if (currentPreviewData) startPreviewAnimation(currentPreviewData);
+    return;
+  }
+  previewAnimationState.playing = !previewAnimationState.playing;
+  previewPlayPause.textContent = previewAnimationState.playing ? "\u23F8" : "\u25B6";
+  if (previewAnimationState.playing) {
+    previewAnimationState.lastTime = null;
+    previewAnimationState.animFrameId = requestAnimationFrame(function animate(ts) {
+      if (!previewAnimationState?.playing || previewAnimationState.done) return;
+      if (!previewAnimationState.lastTime) previewAnimationState.lastTime = ts;
+      const dt = ts - previewAnimationState.lastTime;
+      previewAnimationState.lastTime = ts;
+      advanceAnimation(previewAnimationState, previewAnimationState.pixelsPerMs * previewAnimationState.speed * dt);
+      drawFrame(previewCanvas.getContext("2d"), previewCanvas, previewAnimationState);
+      if (!previewAnimationState.done) {
+        previewAnimationState.animFrameId = requestAnimationFrame(animate);
+      } else {
+        previewPlayPause.textContent = "\u25B6";
+      }
+    });
+  }
+});
+
+previewRestart.addEventListener("click", () => {
+  if (currentPreviewData) startPreviewAnimation(currentPreviewData);
+});
+
+previewSkip.addEventListener("click", skipPreviewAnimation);
+
+previewSpeed.addEventListener("change", () => {
+  if (previewAnimationState) {
+    previewAnimationState.speed = Number(previewSpeed.value) || 5;
+  }
+});
+
+previewPaperSize.addEventListener("change", () => {
+  customPaperFields.style.display = previewPaperSize.value === "Custom" ? "" : "none";
+  debouncedRefreshPreview();
+});
+
+// Parameter change listeners
+for (const el of [
+  previewPaperWidth, previewPaperHeight, previewRenderMode,
+  previewFontSize, previewPenTip,
+  previewMarginTop, previewMarginRight, previewMarginBottom, previewMarginLeft,
+  previewOffsetX, previewOffsetY,
+]) {
+  el.addEventListener("change", debouncedRefreshPreview);
+  el.addEventListener("input", debouncedRefreshPreview);
+}
+
+// Modal font picker trigger
+previewFontTrigger.addEventListener("click", () => {
+  const subset = previewFontTrigger.dataset.subset || "latin";
+  const currentFamily = previewFontValue.value;
+  openFontPicker(previewFontTrigger, subset, currentFamily, setPreviewFont, {
+    hersheyFonts: cachedHersheyFonts || [],
+  });
+});
+
+// ── Intercept Send-to-Robot clicks to open modal ──
+
+function handleSendToRobot(item) {
+  if (!item) {
+    robotStatus.textContent = "Record and transcribe something first.";
+    return;
+  }
+  openPreviewModal(item);
+}
 
 recordButton.addEventListener("click", startRecording);
 stopButton.addEventListener("click", stopRecording);
@@ -917,9 +1632,10 @@ pairRobotButton.addEventListener("click", pairRobot);
 discoverRobotsButton.addEventListener("click", discoverRobots);
 refreshRobotButton.addEventListener("click", loadRobotState);
 unpairRobotButton.addEventListener("click", unpairRobot);
-sendTranscriptButton.addEventListener("click", sendTranscriptToRobot);
+sendTranscriptButton.addEventListener("click", () => handleSendToRobot(getCurrentTranscript()));
 transcriptSizePicker.innerHTML = FONT_SIZES.map(
   (s) => `<option value="${s}"${s === DEFAULT_FONT_SIZE ? " selected" : ""}>${s}</option>`
 ).join("");
 loadHistory();
 loadRobotState();
+loadPaperSizes();

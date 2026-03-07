@@ -26,9 +26,14 @@ def _fetch_fonts() -> list[dict]:
         timeout=15,
     )
     resp.raise_for_status()
-    # Only keep the fields we actually use to reduce memory (~80% smaller)
+    # Keep fields we use: family, subsets, category, and TTF URL for font rendering
     return [
-        {"family": f["family"], "subsets": f.get("subsets", []), "category": f.get("category", "")}
+        {
+            "family": f["family"],
+            "subsets": f.get("subsets", []),
+            "category": f.get("category", ""),
+            "ttf_url": (f.get("files") or {}).get("regular", ""),
+        }
         for f in resp.json().get("items", [])
     ]
 
@@ -79,6 +84,15 @@ def get_default_font(subset: str) -> str:
             first_match = font["family"]
 
     return first_match or DEFAULT_FONT_FAMILY
+
+
+def get_ttf_url(font_family: str) -> str | None:
+    fonts = _get_cached_fonts()
+    for font in fonts:
+        if font["family"] == font_family:
+            url = font.get("ttf_url", "")
+            return url if url else None
+    return None
 
 
 def warm_cache() -> None:

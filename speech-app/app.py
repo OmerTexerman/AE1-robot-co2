@@ -8,9 +8,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
-from braille_translator import available_grades, normalize_grade, translate_to_braille_text
+from braille_translator import available_grades, normalize_grade, translate_to_braille, translate_to_braille_text
 from font_selector import choose_font
 from google_fonts import DEFAULT_FONT_FAMILY, get_fonts_for_subset, warm_cache
+from paper_sizes import (
+    DEFAULT_FONT_SIZE_MM,
+    DEFAULT_MARGINS,
+    DEFAULT_PEN_TIP_MM,
+    GANTRY_HEIGHT_MM,
+    GANTRY_WIDTH_MM,
+    PAPER_OFFSET,
+    get_paper_size,
+    list_paper_sizes,
+)
+from font_renderer import list_hershey_fonts
+from toolpath import generate_braille_toolpath, generate_write_toolpath
 from robot_client import DEFAULT_PORT, RobotClientError, send_braille_job, send_render_job
 from robot_service import (
     discover_available_robots,
@@ -314,6 +326,79 @@ def robot_render():
         config["port"],
         result.get("job_id"),
     )
+    return jsonify(result)
+
+
+@app.get("/paper-sizes")
+def paper_sizes():
+    return jsonify({
+        "sizes": list_paper_sizes(),
+        "gantry": {"width": GANTRY_WIDTH_MM, "height": GANTRY_HEIGHT_MM},
+        "defaults": {
+            "font_size_mm": DEFAULT_FONT_SIZE_MM,
+            "pen_tip_mm": DEFAULT_PEN_TIP_MM,
+            "margins": DEFAULT_MARGINS,
+            "paper_offset": PAPER_OFFSET,
+        },
+    })
+
+
+@app.get("/hershey-fonts")
+def hershey_fonts():
+    return jsonify({"fonts": list_hershey_fonts()})
+
+
+@app.post("/toolpath/preview")
+def toolpath_preview():
+    payload = request_payload()
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        return jsonify({"error": "Text is required."}), 400
+
+    mode = str(payload.get("mode", "write")).strip()
+
+    # Paper size
+    paper_name = str(payload.get("paper_size", "A4")).strip()
+    paper = get_paper_size(paper_name)
+    if not paper:
+        custom_w = payload.get("paper_width")
+        custom_h = payload.get("paper_height")
+        if custom_w and custom_h:
+            try:
+                paper = (float(custom_w), float(custom_h))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid custom paper dimensions."}), 400
+        else:
+            paper = get_paper_size("A4")
+
+    margins = payload.get("margins", DEFAULT_MARGINS)
+    paper_offset = payload.get("paper_offset", PAPER_OFFSET)
+
+    try:
+        if mode == "braille":
+            language = str(payload.get("language", "en")).strip() or "en"
+            grade = normalize_grade(payload.get("grade", 1))
+            result = generate_braille_toolpath(
+                text, language=language, grade=grade,
+                paper_size=paper, margins=margins, paper_offset=paper_offset,
+            )
+        else:
+            font_family = str(payload.get("font_family", "")).strip() or DEFAULT_FONT_FAMILY
+            font_size_mm = float(payload.get("font_size_mm", DEFAULT_FONT_SIZE_MM))
+            pen_tip_mm = float(payload.get("pen_tip_mm", DEFAULT_PEN_TIP_MM))
+            render_mode = str(payload.get("render_mode", "outline")).strip()
+            if render_mode not in ("outline", "filled", "centerline"):
+                render_mode = "outline"
+
+            result = generate_write_toolpath(
+                text, font_family, font_size_mm=font_size_mm,
+                paper_size=paper, margins=margins, pen_tip_mm=pen_tip_mm,
+                render_mode=render_mode, paper_offset=paper_offset,
+            )
+    except Exception as exc:
+        app.logger.exception("toolpath_preview failed: %s", exc)
+        return jsonify({"error": f"Toolpath generation failed: {exc}"}), 500
+
     return jsonify(result)
 
 

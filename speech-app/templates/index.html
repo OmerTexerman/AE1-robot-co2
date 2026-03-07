@@ -99,6 +99,81 @@
       </div>
     </main>
 
+    <div id="previewModal" class="modal-overlay" style="display:none">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Toolpath Preview</h3>
+          <button type="button" class="modal-close" id="previewModalClose">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-canvas-wrap">
+            <canvas id="previewCanvas" width="540" height="700"></canvas>
+            <div class="preview-playback">
+              <button type="button" id="previewPlayPause" title="Play/Pause">&#9654;</button>
+              <button type="button" id="previewRestart" title="Restart">&#8634;</button>
+              <button type="button" id="previewSkip" title="Skip to end">&#9646;&#9646;</button>
+              <select id="previewSpeed">
+                <option value="1">1x</option>
+                <option value="2">2x</option>
+                <option value="5" selected>5x</option>
+                <option value="10">10x</option>
+              </select>
+            </div>
+          </div>
+          <div class="preview-controls">
+            <label>
+              Paper Size
+              <select id="previewPaperSize"></select>
+            </label>
+            <div id="customPaperFields" style="display:none">
+              <label>Width (mm) <input type="number" id="previewPaperWidth" value="210" min="10" step="1" /></label>
+              <label>Height (mm) <input type="number" id="previewPaperHeight" value="297" min="10" step="1" /></label>
+            </div>
+            <label>
+              Font
+              <button type="button" class="font-trigger" id="previewFontTrigger">
+                <span class="font-trigger-label">Font</span>
+                <span class="font-trigger-arrow">&#9662;</span>
+              </button>
+              <input type="hidden" id="previewFontValue" />
+            </label>
+            <label>
+              Render Mode
+              <select id="previewRenderMode">
+                <option value="outline">Outline</option>
+                <option value="filled">Filled (outline + hatching)</option>
+                <option value="centerline">Single-stroke (centerline)</option>
+              </select>
+            </label>
+            <label>
+              Font Size (mm)
+              <input type="number" id="previewFontSize" value="5" min="1" max="50" step="0.5" />
+            </label>
+            <label>
+              Pen Tip (mm)
+              <input type="number" id="previewPenTip" value="0.7" min="0.1" max="5" step="0.1" />
+            </label>
+            <fieldset class="margin-fields">
+              <legend>Margins (mm)</legend>
+              <label>Top <input type="number" id="previewMarginTop" value="10" min="0" step="1" /></label>
+              <label>Right <input type="number" id="previewMarginRight" value="10" min="0" step="1" /></label>
+              <label>Bottom <input type="number" id="previewMarginBottom" value="10" min="0" step="1" /></label>
+              <label>Left <input type="number" id="previewMarginLeft" value="10" min="0" step="1" /></label>
+            </fieldset>
+            <fieldset class="offset-fields">
+              <legend>Paper Offset (mm)</legend>
+              <label>X <input type="number" id="previewOffsetX" value="0" step="1" /></label>
+              <label>Y <input type="number" id="previewOffsetY" value="0" step="1" /></label>
+            </fieldset>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <div id="previewStats" class="preview-stats"></div>
+          <button type="button" id="previewSendButton" disabled>Send to Robot (Phase 2)</button>
+        </div>
+      </div>
+    </div>
+
     <script src="{{ url_for('static', filename='app.js') }}"></script>
   </body>
 </html>
