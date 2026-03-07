@@ -345,7 +345,8 @@ async function openFontPicker(triggerEl, subset, currentFamily, onSelect, { hers
   const cached = await getFontsForSubset(subset);
   const fonts = [...cached];
   // Ensure current font is in the list without mutating cache
-  if (currentFamily && !fonts.some((f) => f.family === currentFamily)) {
+  // (skip for Hershey fonts — they appear in their own section)
+  if (currentFamily && !hersheyFonts.includes(currentFamily) && !fonts.some((f) => f.family === currentFamily)) {
     fonts.unshift({ family: currentFamily, category: "" });
   }
   activeFontPicker.allFonts = fonts;

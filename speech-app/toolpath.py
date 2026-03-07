@@ -34,6 +34,70 @@ def _path_length(points):
     return total
 
 
+def _reorder_paths_nearest_neighbor(paths, start=(0, 0)):
+    """Reorder paths using greedy nearest-neighbor on start/end points.
+    Reverses a path if entering from the end is shorter."""
+    if not paths:
+        return []
+    remaining = list(range(len(paths)))
+    result = []
+    pos = start
+    while remaining:
+        best_idx = None
+        best_dist = float("inf")
+        best_reverse = False
+        for i in remaining:
+            d_start = _distance(pos, paths[i][0])
+            d_end = _distance(pos, paths[i][-1])
+            if d_start < best_dist:
+                best_dist = d_start
+                best_idx = i
+                best_reverse = False
+            if d_end < best_dist:
+                best_dist = d_end
+                best_idx = i
+                best_reverse = True
+        remaining.remove(best_idx)
+        p = list(reversed(paths[best_idx])) if best_reverse else paths[best_idx]
+        result.append(p)
+        pos = p[-1]
+    return result
+
+
+def _merge_nearby_endpoints(paths, tolerance):
+    """Merge consecutive paths whose endpoints are within tolerance."""
+    if not paths:
+        return []
+    merged = [list(paths[0])]
+    for i in range(1, len(paths)):
+        if _distance(merged[-1][-1], paths[i][0]) <= tolerance:
+            merged[-1].extend(paths[i][1:])
+        else:
+            merged.append(list(paths[i]))
+    return merged
+
+
+def _reorder_points_nearest_neighbor(points, start=(0, 0)):
+    """Reorder discrete points using greedy nearest-neighbor."""
+    if not points:
+        return []
+    remaining = list(range(len(points)))
+    result = []
+    pos = start
+    while remaining:
+        best_idx = None
+        best_dist = float("inf")
+        for i in remaining:
+            d = _distance(pos, points[i])
+            if d < best_dist:
+                best_dist = d
+                best_idx = i
+        remaining.remove(best_idx)
+        result.append(points[best_idx])
+        pos = points[best_idx]
+    return result
+
+
 def _word_wrap_glyphs(words_glyphs, max_width):
     """Word wrap using pre-shaped glyph data. Returns list of lines, each line
     is a list of (word_glyphs, word_width) tuples.
@@ -100,6 +164,7 @@ def generate_write_toolpath(
     pen_tip_mm=DEFAULT_PEN_TIP_MM,
     render_mode="outline",
     paper_offset=None,
+    optimize=True,
 ):
     if margins is None:
         margins = dict(DEFAULT_MARGINS)
@@ -162,19 +227,9 @@ def generate_write_toolpath(
 
         all_paragraph_words.append(word_data)
 
-    # Word wrap and build operations
-    operations = []
-    last_point = None
+    # Phase 1: Collect all paths
+    all_paths = []
     cursor_y = top + offset_y + ascender
-
-    draw_distance = 0
-    travel_distance = 0
-    draw_count = 0
-    travel_count = 0
-    min_x = float("inf")
-    min_y = float("inf")
-    max_x = float("-inf")
-    max_y = float("-inf")
 
     for para_words in all_paragraph_words:
         if not para_words:
@@ -193,43 +248,18 @@ def generate_write_toolpath(
                     gx = cursor_x + glyph.x_offset
                     gy = cursor_y + glyph.y_offset
 
-                    glyph_paths = []
                     for path in glyph.paths:
                         translated = [(gx + px, gy + py) for px, py in path]
-                        glyph_paths.append(translated)
+                        if len(translated) >= 2:
+                            all_paths.append(translated)
 
                     # Add hatch fill if filled mode
                     if render_mode == "filled" and glyph.paths:
                         hatch = hatch_fill(glyph.paths, pen_tip_mm)
                         for hatch_path in hatch:
                             translated = [(gx + px, gy + py) for px, py in hatch_path]
-                            glyph_paths.append(translated)
-
-                    # Generate operations for this glyph's paths
-                    for path in glyph_paths:
-                        if len(path) < 2:
-                            continue
-
-                        for pt in path:
-                            min_x = min(min_x, pt[0])
-                            min_y = min(min_y, pt[1])
-                            max_x = max(max_x, pt[0])
-                            max_y = max(max_y, pt[1])
-
-                        # Travel to start of path
-                        start = path[0]
-                        if last_point and last_point != start:
-                            travel_pts = [list(last_point), list(start)]
-                            operations.append({"type": "travel", "points": travel_pts})
-                            travel_distance += _distance(last_point, start)
-                            travel_count += 1
-
-                        # Draw the path
-                        draw_pts = [list(pt) for pt in path]
-                        operations.append({"type": "draw", "points": draw_pts})
-                        draw_distance += _path_length(path)
-                        draw_count += 1
-                        last_point = path[-1]
+                            if len(translated) >= 2:
+                                all_paths.append(translated)
 
                     cursor_x += glyph.advance
 
@@ -237,6 +267,45 @@ def generate_write_toolpath(
                 cursor_x += space_width
 
             cursor_y += line_height
+
+    # Phase 2: Optimize path ordering
+    if optimize and all_paths:
+        all_paths = _reorder_paths_nearest_neighbor(all_paths)
+        all_paths = _merge_nearby_endpoints(all_paths, max(pen_tip_mm * 0.5, 0.1))
+
+    # Phase 3: Emit operations and compute stats
+    operations = []
+    last_point = None
+    draw_distance = 0
+    travel_distance = 0
+    draw_count = 0
+    travel_count = 0
+    min_x = float("inf")
+    min_y = float("inf")
+    max_x = float("-inf")
+    max_y = float("-inf")
+
+    for path in all_paths:
+        for pt in path:
+            min_x = min(min_x, pt[0])
+            min_y = min(min_y, pt[1])
+            max_x = max(max_x, pt[0])
+            max_y = max(max_y, pt[1])
+
+        # Travel to start of path
+        start = path[0]
+        if last_point and last_point != start:
+            travel_pts = [list(last_point), list(start)]
+            operations.append({"type": "travel", "points": travel_pts})
+            travel_distance += _distance(last_point, start)
+            travel_count += 1
+
+        # Draw the path
+        draw_pts = [list(pt) for pt in path]
+        operations.append({"type": "draw", "points": draw_pts})
+        draw_distance += _path_length(path)
+        draw_count += 1
+        last_point = path[-1]
 
     return {
         "mode": "write",
@@ -267,6 +336,7 @@ def generate_braille_toolpath(
     paper_size=(210, 297),
     margins=None,
     paper_offset=None,
+    optimize=True,
 ):
     if margins is None:
         margins = dict(DEFAULT_MARGINS)
@@ -319,16 +389,8 @@ def generate_braille_toolpath(
     if current_line:
         wrapped_lines.append(current_line)
 
-    # Generate operations
-    operations = []
-    last_point = None
-    travel_distance = 0
-    punch_count = 0
-    min_x = float("inf")
-    min_y = float("inf")
-    max_x = float("-inf")
-    max_y = float("-inf")
-
+    # Phase 1: Collect all dot positions
+    all_dots = []
     cursor_y = top + offset_y
 
     for line_words in wrapped_lines:
@@ -342,10 +404,6 @@ def generate_braille_toolpath(
                 cursor_x += BRAILLE_WORD_GAP
 
             for cell in word:
-                # Each cell has dot positions (1-6):
-                # 1 4
-                # 2 5
-                # 3 6
                 for dot in cell:
                     if dot == 1:
                         dx, dy = 0, 0
@@ -362,32 +420,48 @@ def generate_braille_toolpath(
                     else:
                         continue
 
-                    px = cursor_x + dx
-                    py = cursor_y + dy
-                    point = [px, py]
-
-                    min_x = min(min_x, px)
-                    min_y = min(min_y, py)
-                    max_x = max(max_x, px)
-                    max_y = max(max_y, py)
-
-                    # Travel to dot position
-                    if last_point:
-                        travel_pts = [list(last_point), point]
-                        operations.append({"type": "travel", "points": travel_pts})
-                        travel_distance += _distance(last_point, point)
-                    else:
-                        operations.append({"type": "travel", "points": [[0, 0], point]})
-                        travel_distance += _distance((0, 0), point)
-
-                    # Punch
-                    operations.append({"type": "punch", "point": point})
-                    punch_count += 1
-                    last_point = point
+                    all_dots.append((cursor_x + dx, cursor_y + dy))
 
                 cursor_x += BRAILLE_CELL_WIDTH
 
         cursor_y += BRAILLE_CELL_HEIGHT
+
+    # Phase 2: Optimize dot ordering
+    if optimize and all_dots:
+        all_dots = _reorder_points_nearest_neighbor(all_dots)
+
+    # Phase 3: Emit operations and compute stats
+    operations = []
+    last_point = None
+    travel_distance = 0
+    punch_count = 0
+    min_x = float("inf")
+    min_y = float("inf")
+    max_x = float("-inf")
+    max_y = float("-inf")
+
+    for dot in all_dots:
+        px, py = dot
+        point = [px, py]
+
+        min_x = min(min_x, px)
+        min_y = min(min_y, py)
+        max_x = max(max_x, px)
+        max_y = max(max_y, py)
+
+        # Travel to dot position
+        if last_point:
+            travel_pts = [list(last_point), point]
+            operations.append({"type": "travel", "points": travel_pts})
+            travel_distance += _distance(last_point, point)
+        else:
+            operations.append({"type": "travel", "points": [[0, 0], point]})
+            travel_distance += _distance((0, 0), point)
+
+        # Punch
+        operations.append({"type": "punch", "point": point})
+        punch_count += 1
+        last_point = point
 
     return {
         "mode": "braille",
