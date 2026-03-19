@@ -1040,6 +1040,22 @@ brailleSelect.addEventListener("change", () => {
     updateHistoryItem(currentTranscriptId, { braille_grade: grade });
     const historyBraille = historyList.querySelector(`.braille-picker[data-history-id="${currentTranscriptId}"]`);
     if (historyBraille) historyBraille.value = String(grade === "off" ? "off" : grade);
+    // Also update the history item's displayed text
+    const item = findTranscriptInHistory(currentTranscriptId);
+    const textEl = historyList.querySelector(`[data-history-text-id="${currentTranscriptId}"]`);
+    if (item && textEl) {
+      if (grade === "off") {
+        textEl.textContent = item.text;
+        textEl.style.fontFamily = cssFontFamily(item.font_family);
+      } else {
+        fetchBraillePreview(item.text, item.language, grade)
+          .then((brailleText) => {
+            textEl.textContent = brailleText;
+            textEl.style.fontFamily = "";
+          })
+          .catch(() => {});
+      }
+    }
   }
 });
 
