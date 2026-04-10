@@ -1,4 +1,3 @@
-import network
 import socket
 import time
 import ujson
@@ -8,9 +7,14 @@ import uselect
 from machine import unique_id
 
 try:
+    import network
+except ImportError:
+    network = None
+
+try:
     import secrets
 except ImportError:
-    raise RuntimeError("Copy secrets.example.py to secrets.py and fill in Wi-Fi settings.")
+    raise RuntimeError("Copy secrets.example.py to secrets.py and fill in the robot settings.")
 
 try:
     from boot import cdc_data
@@ -29,6 +33,9 @@ STATE_PATH = "pairing_state.json"
 LAST_RENDER_PATH = "last_render.json"
 BUFFER_SIZE = 4096
 SERIAL_BUF_MAX = 4096
+SERIAL_FRAME_PREFIX = b"AE1 "
+SERIAL_FRAME_HEADER_MAX = 32
+SERIAL_MESSAGE_MAX = 131072
 DISCOVERY_MAGIC = b"AE1_DISCOVERY_V1"
 CLIENT_TIMEOUT_SECONDS = 3
 MAX_OPERATIONS = 5000
@@ -199,6 +206,7 @@ def hello_payload(ip_address, state):
         "ip_address": ip_address,
         "listen_port": secrets.LISTEN_PORT,
         "paired": bool(state.get("pair_token")),
+        "serial_framing": True,
     }
     if _motion is not None:
         payload["work_area_mm"] = [pins.WORK_AREA_X_MM, pins.WORK_AREA_Y_MM]
@@ -419,11 +427,20 @@ def serial_write(cdc, data):
         log("serial write error={}".format(exc))
 
 
-def handle_serial_command(cdc, line, ip_address):
+def serial_write_response(cdc, payload, framed=False):
+    body = ujson.dumps(payload).encode()
+    if framed:
+        header = SERIAL_FRAME_PREFIX + str(len(body)).encode() + b"\n"
+        serial_write(cdc, header + body)
+    else:
+        serial_write(cdc, body + b"\n")
+
+
+def handle_serial_command(cdc, message, ip_address, framed=False):
     try:
-        cmd = ujson.loads(line)
+        cmd = ujson.loads(message)
     except ValueError:
-        serial_write(cdc, ujson.dumps({"status": 400, "body": {"error": "Invalid JSON"}}).encode() + b"\n")
+        serial_write_response(cdc, {"status": 400, "body": {"error": "Invalid JSON"}}, framed=framed)
         return
 
     method = cmd.get("method", "GET").upper()
@@ -445,7 +462,7 @@ def handle_serial_command(cdc, line, ip_address):
         status_code = 500
         response_body = {"error": "Robot server error: {}".format(exc)}
 
-    serial_write(cdc, ujson.dumps({"status": status_code, "body": response_body}).encode() + b"\n")
+    serial_write_response(cdc, {"status": status_code, "body": response_body}, framed=framed)
 
 
 def handle_discovery(discovery_socket, ip_address):
@@ -468,22 +485,130 @@ def drain_serial(cdc, serial_buf, ip_address):
         return serial_buf
 
     serial_buf.extend(chunk)
-    if len(serial_buf) > SERIAL_BUF_MAX:
-        log("serial buffer overflow, discarding {} bytes".format(len(serial_buf)))
-        serial_buf[:] = b""
-        return serial_buf
     while True:
+        if serial_buf.startswith(SERIAL_FRAME_PREFIX):
+            nl = serial_buf.find(b"\n")
+            if nl < 0:
+                if len(serial_buf) > SERIAL_FRAME_HEADER_MAX:
+                    log("serial frame header too large, discarding {} bytes".format(len(serial_buf)))
+                    serial_buf[:] = b""
+                break
+
+            try:
+                message_len = int(bytes(serial_buf[len(SERIAL_FRAME_PREFIX):nl]))
+            except ValueError:
+                log("serial frame header invalid, dropping {} bytes".format(nl + 1))
+                serial_buf[:] = serial_buf[nl + 1:]
+                continue
+
+            if message_len < 0 or message_len > SERIAL_MESSAGE_MAX:
+                log("serial frame rejected len={}".format(message_len))
+                serial_buf[:] = b""
+                break
+
+            frame_end = nl + 1 + message_len
+            if len(serial_buf) < frame_end:
+                break
+
+            message = bytes(serial_buf[nl + 1:frame_end])
+            serial_buf[:] = serial_buf[frame_end:]
+            try:
+                handle_serial_command(cdc, message.decode(), ip_address, framed=True)
+            except Exception as exc:
+                log("serial command error={}".format(exc))
+            continue
+
         nl = serial_buf.find(b"\n")
         if nl < 0:
+            if len(serial_buf) > SERIAL_BUF_MAX:
+                log("serial buffer overflow, discarding {} bytes".format(len(serial_buf)))
+                serial_buf[:] = b""
             break
         line = bytes(serial_buf[:nl]).strip()
         serial_buf[:] = serial_buf[nl + 1:]
         if line:
             try:
-                handle_serial_command(cdc, line.decode(), ip_address)
+                handle_serial_command(cdc, line.decode(), ip_address, framed=False)
             except Exception as exc:
                 log("serial command error={}".format(exc))
     return serial_buf
+
+
+def setup_wifi(serial_buf, cdc):
+    ip_address = "0.0.0.0"
+    if network is None or not hasattr(network, "WLAN") or not hasattr(network, "STA_IF"):
+        log("Wi-Fi not supported on this board. USB serial only.")
+        return None, ip_address, serial_buf
+
+    try:
+        wlan = network.WLAN(network.STA_IF)
+        wlan.active(True)
+    except Exception as exc:
+        log("Wi-Fi unavailable: {}. USB serial only.".format(exc))
+        return None, ip_address, serial_buf
+
+    ssid = getattr(secrets, "WIFI_SSID", "")
+    password = getattr(secrets, "WIFI_PASSWORD", "")
+    if not ssid:
+        log("Wi-Fi credentials not configured. USB serial only.")
+        return wlan, ip_address, serial_buf
+
+    if not wlan.isconnected():
+        try:
+            wlan.connect(ssid, password)
+        except Exception as exc:
+            log("Wi-Fi connect failed immediately: {}. USB serial only.".format(exc))
+            return wlan, ip_address, serial_buf
+
+    log("Waiting for Wi-Fi (serial is active)...")
+    for _ in range(60):
+        if wlan.isconnected():
+            break
+        time.sleep(0.5)
+        if cdc is not None:
+            serial_buf = drain_serial(cdc, serial_buf, ip_address)
+
+    if wlan.isconnected():
+        ip_address = wlan.ifconfig()[0]
+        log("Robot Wi-Fi ready at http://{}:{}".format(ip_address, secrets.LISTEN_PORT))
+    else:
+        log("Wi-Fi connection failed. Continuing with USB serial only.")
+
+    return wlan, ip_address, serial_buf
+
+
+def setup_network_servers(poller):
+    tcp_server = None
+    udp_server = None
+    try:
+        tcp_address = socket.getaddrinfo("0.0.0.0", secrets.LISTEN_PORT)[0][-1]
+        tcp_server = socket.socket()
+        tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        tcp_server.bind(tcp_address)
+        tcp_server.listen(1)
+        tcp_server.setblocking(False)
+
+        discovery_port = getattr(secrets, "DISCOVERY_PORT", 9090)
+        udp_address = socket.getaddrinfo("0.0.0.0", discovery_port)[0][-1]
+        udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_server.bind(udp_address)
+        udp_server.setblocking(False)
+
+        poller.register(tcp_server, uselect.POLLIN)
+        poller.register(udp_server, uselect.POLLIN)
+        return tcp_server, udp_server
+    except Exception as exc:
+        log("Network services unavailable: {}. USB serial only.".format(exc))
+        try:
+            tcp_server.close()
+        except Exception:
+            pass
+        try:
+            udp_server.close()
+        except Exception:
+            pass
+        return None, None
 
 
 def _run_pending_job():
@@ -554,48 +679,19 @@ def serve():
     serial_buf = bytearray()
     ip_address = "0.0.0.0"
 
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    if not wlan.isconnected():
-        wlan.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
-
     poller = uselect.poll()
+    tcp_server = None
+    udp_server = None
 
     if cdc_data is not None:
         log("CDC data channel available")
 
-    log("Waiting for Wi-Fi (serial is active)...")
-    for _ in range(60):
-        if wlan.isconnected():
-            break
-        time.sleep(0.5)
-        if cdc_data is not None:
-            serial_buf = drain_serial(cdc_data, serial_buf, ip_address)
-
-    if wlan.isconnected():
-        ip_address = wlan.ifconfig()[0]
-        log("Robot Wi-Fi ready at http://{}:{}".format(ip_address, secrets.LISTEN_PORT))
-    else:
-        log("Wi-Fi connection failed. Continuing with USB serial only.")
+    wlan, ip_address, serial_buf = setup_wifi(serial_buf, cdc_data)
 
     log("Pairing code: {}".format(secrets.PAIRING_CODE))
 
-    tcp_address = socket.getaddrinfo("0.0.0.0", secrets.LISTEN_PORT)[0][-1]
-    tcp_server = socket.socket()
-    tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    tcp_server.bind(tcp_address)
-    tcp_server.listen(1)
-    tcp_server.setblocking(False)
-
-    discovery_port = getattr(secrets, "DISCOVERY_PORT", 9090)
-    udp_address = socket.getaddrinfo("0.0.0.0", discovery_port)[0][-1]
-    udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    udp_server.bind(udp_address)
-    udp_server.setblocking(False)
-
-    poller.register(tcp_server, uselect.POLLIN)
-    poller.register(udp_server, uselect.POLLIN)
+    if wlan is not None and wlan.isconnected():
+        tcp_server, udp_server = setup_network_servers(poller)
 
     # During motion this stays non-blocking; when idle it can block in poll().
     def service_io(poll_timeout_ms=0):
@@ -605,7 +701,7 @@ def serve():
         except OSError:
             events = []
         for sock, _ev in events:
-            if sock is tcp_server:
+            if tcp_server is not None and sock is tcp_server:
                 try:
                     client, _addr = tcp_server.accept()
                 except OSError:
@@ -625,7 +721,7 @@ def serve():
                         client.close()
                     except Exception:
                         pass
-            elif sock is udp_server:
+            elif udp_server is not None and sock is udp_server:
                 handle_discovery(udp_server, ip_address)
         if cdc_data is not None:
             serial_buf = drain_serial(cdc_data, serial_buf, ip_address)

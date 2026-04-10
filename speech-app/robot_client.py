@@ -21,6 +21,8 @@ except ImportError:
 DEFAULT_PORT = 8080
 REQUEST_TIMEOUT_SECONDS = 4
 SERIAL_TIMEOUT_SECONDS = 2
+SERIAL_FRAME_PREFIX = b"AE1 "
+SERIAL_MESSAGE_MAX = 131072
 DISCOVERY_PORT = 9090
 DISCOVERY_MAGIC = "AE1_DISCOVERY_V1"
 UDP_DISCOVERY_TIMEOUT_SECONDS = 0.45
@@ -30,7 +32,7 @@ MAX_SCAN_NETWORKS = 4
 PICO_USB_VID = 0x2E8A
 TRANSPORT_HTTP = "http"
 TRANSPORT_SERIAL = "serial"
-DEFAULT_DEVICE_NAME = "Pico 2 W"
+DEFAULT_DEVICE_NAME = "AE1 Pico"
 DEFAULT_DEVICE_ID = "unknown"
 
 
@@ -78,10 +80,14 @@ class HttpTransport(Transport):
 
 
 class SerialTransport(Transport):
-    def __init__(self, port: str):
+    def __init__(self, port: str, prefer_framed: bool = False):
         self._port_path = port
         self._lock = threading.Lock()
         self._conn: "serial.Serial | None" = None
+        self._prefer_framed = prefer_framed
+
+    def set_framing(self, prefer_framed: bool) -> None:
+        self._prefer_framed = prefer_framed
 
     def _open(self) -> "serial.Serial":
         if self._conn is not None and self._conn.is_open:
@@ -94,25 +100,24 @@ class SerialTransport(Transport):
             raise RobotClientError(f"Cannot open USB port {self._port_path}: {exc}") from exc
         return self._conn
 
-    def request(self, method: str, path: str, headers: dict | None = None, json_body: dict | None = None) -> dict:
-        cmd = {"method": method.upper(), "path": path}
-        if json_body:
-            cmd["body"] = json_body
-        line = json.dumps(cmd, separators=(",", ":")) + "\n"
+    def _encode_message(self, payload: dict) -> bytes:
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        if not self._prefer_framed:
+            return body + b"\n"
+        return SERIAL_FRAME_PREFIX + str(len(body)).encode() + b"\n" + body
 
-        with self._lock:
-            try:
-                conn = self._open()
-                conn.write(line.encode())
-                conn.flush()
-                raw = conn.readline()
-            except (serial.SerialException, OSError) as exc:
-                self._close_internal()
-                raise RobotClientError(f"USB serial communication failed: {exc}") from exc
+    def _read_exact(self, conn: "serial.Serial", size: int) -> bytes:
+        chunks: list[bytes] = []
+        received = 0
+        while received < size:
+            chunk = conn.read(size - received)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            received += len(chunk)
+        return b"".join(chunks)
 
-        if not raw:
-            raise RobotClientError("No response from robot over USB serial (timeout).")
-
+    def _decode_envelope(self, raw: bytes) -> dict:
         try:
             envelope = json.loads(raw.decode().strip())
         except (ValueError, UnicodeDecodeError) as exc:
@@ -120,9 +125,48 @@ class SerialTransport(Transport):
 
         status = envelope.get("status", 200)
         body = envelope.get("body", {})
-
         self._raise_for_status(status, body)
         return body
+
+    def _read_response(self, conn: "serial.Serial") -> dict:
+        header = conn.read_until(b"\n")
+        if not header:
+            raise RobotClientError("No response from robot over USB serial (timeout).")
+
+        if not self._prefer_framed or not header.startswith(SERIAL_FRAME_PREFIX):
+            return self._decode_envelope(header)
+
+        try:
+            payload_size = int(header[len(SERIAL_FRAME_PREFIX):-1])
+        except ValueError as exc:
+            raise RobotClientError("Invalid framed response header from robot over USB serial.") from exc
+
+        if payload_size < 0 or payload_size > SERIAL_MESSAGE_MAX:
+            raise RobotClientError(f"Robot returned an oversized USB serial frame ({payload_size} bytes).")
+
+        raw = self._read_exact(conn, payload_size)
+        if len(raw) != payload_size:
+            raise RobotClientError("Incomplete framed response from robot over USB serial.")
+        return self._decode_envelope(raw)
+
+    def request(self, method: str, path: str, headers: dict | None = None, json_body: dict | None = None) -> dict:
+        cmd = {"method": method.upper(), "path": path}
+        if headers:
+            cmd["headers"] = headers
+        if json_body is not None:
+            cmd["body"] = json_body
+        message = self._encode_message(cmd)
+
+        with self._lock:
+            try:
+                conn = self._open()
+                conn.write(message)
+                conn.flush()
+            except (serial.SerialException, OSError) as exc:
+                self._close_internal()
+                raise RobotClientError(f"USB serial communication failed: {exc}") from exc
+
+            return self._read_response(conn)
 
     def _close_internal(self) -> None:
         if self._conn is not None:
@@ -144,9 +188,12 @@ _serial_transports_lock = threading.Lock()
 def get_transport(config: dict) -> Transport:
     if config.get("transport") == TRANSPORT_SERIAL:
         port = config["serial_port"]
+        prefer_framed = bool(config.get("serial_framing"))
         with _serial_transports_lock:
             if port not in _serial_transports:
-                _serial_transports[port] = SerialTransport(port)
+                _serial_transports[port] = SerialTransport(port, prefer_framed=prefer_framed)
+            else:
+                _serial_transports[port].set_framing(prefer_framed)
             return _serial_transports[port]
     return HttpTransport(config["base_url"])
 
@@ -230,6 +277,7 @@ def pair_robot_usb(serial_port: str, client_name: str) -> dict:
         "client_name": client_name,
         "pair_token": None,
         "paired_at": datetime.now(timezone.utc).isoformat(),
+        "serial_framing": bool(hello.get("serial_framing")),
     }
 
 
@@ -543,6 +591,7 @@ def discover_usb_robots() -> list[dict]:
         "device_name": hello.get("device_name", DEFAULT_DEVICE_NAME),
         "device_id": hello.get("device_id", DEFAULT_DEVICE_ID),
         "paired": bool(hello.get("paired")),
+        "serial_framing": bool(hello.get("serial_framing")),
         "usb": True,
         "serial_port": data_port,
     }]

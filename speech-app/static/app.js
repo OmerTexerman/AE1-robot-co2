@@ -573,7 +573,7 @@ function renderRobotState(payload, options = {}) {
     if (payload.warning) {
       robotStatus.textContent = payload.warning;
     } else if (!preserveStatus) {
-      robotStatus.textContent = "Pair the speech app to your Pico 2 W over the current local network.";
+      robotStatus.textContent = "Pair the speech app to your Pico over USB or the current local network.";
     }
     robotMeta.innerHTML = "";
     syncRobotControls();
