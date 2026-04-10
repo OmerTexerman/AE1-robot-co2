@@ -35,9 +35,6 @@ MAX_OPERATIONS = 5000
 MAX_POINTS_PER_OP = 2000
 
 _state_cache = None
-
-# Global motion controller and pending-job inbox.
-# Both populated inside serve(); referenced by dispatch_request().
 _motion = None
 _pending_job = None
 
@@ -171,13 +168,11 @@ def parse_request(client):
         except ValueError:
             payload = {}
 
-    # Strip query string from the path so handlers can match exact paths.
-    raw_path = path
     qs = ""
     if "?" in path:
         path, _, qs = path.partition("?")
 
-    return method, path, qs, raw_path, headers, payload
+    return method, path, qs, headers, payload
 
 
 def parse_query(qs):
@@ -211,10 +206,6 @@ def hello_payload(ip_address, state):
     return payload
 
 
-# ---------------------------------------------------------------------------
-# Job queueing helpers
-# ---------------------------------------------------------------------------
-
 def _set_pending_job(action, payload, kind):
     """Reserve the motion controller for a new action. Returns (job_id, error_message).
     error_message is non-None on rejection (busy, validation failed, etc)."""
@@ -228,8 +219,7 @@ def _set_pending_job(action, payload, kind):
         return None, "robot is not homed"
 
     job_id = make_job_id(kind)
-    # Mark motion state as queued so /job polls between accept and execution
-    # see something coherent.
+    # Let /job reflect the queued state immediately.
     js = _motion._job_state
     js["status"] = "queued"
     js["kind"] = kind
@@ -275,10 +265,6 @@ def _validate_render_payload(payload):
 
     return operations, None
 
-
-# ---------------------------------------------------------------------------
-# Request dispatch
-# ---------------------------------------------------------------------------
 
 def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=False):
     state = load_state()
@@ -327,8 +313,6 @@ def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=F
         log("unpair completed")
         return 200, {"ok": True}
 
-    # ----- motion endpoints -----
-
     if method == "GET" and path == "/job":
         if _motion is None:
             return 503, {"error": "motion not initialized"}
@@ -356,7 +340,6 @@ def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=F
         return 202, {"accepted": True, "job_id": job_id, "kind": "calibrate"}
 
     if method == "POST" and path == "/jog":
-        # Relative jog by (dx, dy) in mm. Useful for positioning by hand from the UI.
         try:
             dx = float(payload.get("dx", 0))
             dy = float(payload.get("dy", 0))
@@ -369,7 +352,6 @@ def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=F
         return 202, {"accepted": True, "job_id": job_id, "kind": "jog"}
 
     if method == "POST" and path == "/move":
-        # Absolute move to (x, y) in mm.
         try:
             x = float(payload.get("x"))
             y = float(payload.get("y"))
@@ -383,10 +365,6 @@ def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=F
 
     if method == "POST" and path == "/render":
         mode = payload.get("mode", "write")
-
-        # New protocol: payload includes pre-generated operations from the
-        # speech-app's toolpath pipeline. Old protocol (raw text) is no longer
-        # supported by the firmware — speech-app must run the toolpath now.
         if "operations" not in payload:
             return 400, {"error": "Render requires 'operations' field. Update speech-app."}
 
@@ -418,7 +396,7 @@ def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=F
 
 def handle_request(client, ip_address):
     try:
-        method, path, qs, raw_path, headers, payload = parse_request(client)
+        method, path, qs, headers, payload = parse_request(client)
     except ValueError as exc:
         log("request parse failed error={}".format(exc))
         error_response(client, 400, "Bad request: {}".format(exc))
@@ -508,11 +486,6 @@ def drain_serial(cdc, serial_buf, ip_address):
     return serial_buf
 
 
-# ---------------------------------------------------------------------------
-# Pending-job runner — called from the main loop between service_io passes.
-# Yield callback (service_io) handles new requests during execution.
-# ---------------------------------------------------------------------------
-
 def _run_pending_job():
     """Pop _pending_job and execute it through _motion. Updates job_state.
     Returns True if a job was run, False otherwise."""
@@ -557,7 +530,6 @@ def _run_pending_job():
 
         elif kind == "render":
             _motion.execute_operations(payload["operations"], job_id=job_id)
-            # status set inside execute_operations
             log("render complete job_id={}".format(job_id))
 
         else:
@@ -565,7 +537,6 @@ def _run_pending_job():
             js["error"] = "unknown job kind: {}".format(kind)
 
     except MotionError as exc:
-        # execute_operations already sets status; for other actions we set it here.
         if js["status"] == STATUS_RUNNING:
             if _motion._abort_requested:
                 js["status"] = STATUS_ABORTED
@@ -577,17 +548,12 @@ def _run_pending_job():
     return True
 
 
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
-
 def serve():
     global _motion
 
     serial_buf = bytearray()
     ip_address = "0.0.0.0"
 
-    # Start WiFi connection (non-blocking kick-off)
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     if not wlan.isconnected():
@@ -631,10 +597,7 @@ def serve():
     poller.register(tcp_server, uselect.POLLIN)
     poller.register(udp_server, uselect.POLLIN)
 
-    # service_io is the cooperative-yield callback. It's also called from
-    # the idle path in the main loop. poll_timeout=0 means non-blocking
-    # (used during motion); positive timeout (used when idle) blocks until
-    # a request arrives or the timeout elapses.
+    # During motion this stays non-blocking; when idle it can block in poll().
     def service_io(poll_timeout_ms=0):
         nonlocal serial_buf
         try:
@@ -667,21 +630,14 @@ def serve():
         if cdc_data is not None:
             serial_buf = drain_serial(cdc_data, serial_buf, ip_address)
 
-    # Build the motion controller now that service_io exists. The yield
-    # callback uses non-blocking polling so it never blocks the motors for
-    # more than a few ms per call.
     _motion = Motion(on_yield=lambda: service_io(0))
     log("motion controller ready: work_area={}x{}mm steps_per_mm={}".format(
         round(pins.WORK_AREA_X_MM, 1), round(pins.WORK_AREA_Y_MM, 1), pins.STEPS_PER_MM))
 
     while True:
         if _pending_job is not None:
-            # Run queued action. The motion code yields to service_io
-            # periodically during execution, so new requests get handled.
             _run_pending_job()
         else:
-            # Idle: block in poll for up to 1 sec to save CPU and let WiFi
-            # background tasks breathe.
             service_io(1000)
 
 

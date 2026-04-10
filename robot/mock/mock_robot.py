@@ -1,11 +1,4 @@
-"""Mock robot server that mimics the Pico 2 W HTTP API for testing.
-
-Implements the new motion-control API surface (home / calibrate / jog / move
-/ render / job / job/abort) so the speech-app UI can be exercised end-to-end
-without real hardware. Job progress is faked by advancing op_index over time
-in a background thread, so the live-cursor preview tracking has plausible
-data to render.
-"""
+"""Mock Pico HTTP API for exercising the speech app without hardware."""
 
 import json
 import threading
@@ -17,12 +10,12 @@ DEVICE_NAME = "MockPico2W"
 DEVICE_ID = "mock-pico-001"
 LISTEN_PORT = 8080
 
-# Geometry-ish constants matching the real Pico's pins.py defaults
+# Match the firmware defaults from pins.py.
 WORK_AREA_X_MM = 247.0
 WORK_AREA_Y_MM = 205.0
 STEPS_PER_MM = 40
 
-# Single global motion state — same shape as the real firmware's get_status()
+# Shared motion state in the same shape returned by the real firmware.
 MOTION_LOCK = threading.Lock()
 MOTION = {
     "status": "idle",
@@ -52,8 +45,7 @@ def _snapshot():
 
 
 def _run_fake_job(kind, payload):
-    """Background thread that simulates a job: ramps op_index, updates
-    position, eventually marks complete (or aborted/failed)."""
+    """Simulate a motion job in the background."""
     global ABORT_REQUESTED
 
     if kind == "home":
@@ -90,13 +82,11 @@ def _run_fake_job(kind, payload):
     if kind == "render":
         operations = payload.get("operations", [])
         total = len(operations)
-        # Walk through each op, sleeping per-op to simulate motion time.
         for i, op in enumerate(operations):
             if ABORT_REQUESTED:
                 _set_motion(status="aborted")
                 ABORT_REQUESTED = False
                 return
-            # Update position to last point of this op
             pts = op.get("points") or []
             if op.get("type") == "punch":
                 pt = op.get("point")

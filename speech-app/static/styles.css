@@ -343,7 +343,6 @@ button:disabled, select:disabled, input:disabled { opacity: 0.4; cursor: not-all
   padding: 0.15rem 0.2rem;
 }
 
-/* Preview Modal */
 .modal-overlay {
   position: fixed;
   inset: 0;

@@ -31,7 +31,6 @@ class MotionError(Exception):
     pass
 
 
-# Job status values used in get_status()["status"]
 STATUS_IDLE     = "idle"
 STATUS_RUNNING  = "running"
 STATUS_COMPLETE = "complete"
@@ -43,9 +42,7 @@ class Motion:
     """Owns the steppers, switches, and pen. Single instance per process."""
 
     def __init__(self, on_yield=None, pen=None):
-        # Cooperative yield: called every YIELD_INTERVAL pulses inside the
-        # inner motion loop so the main HTTP/serial server can service
-        # pending requests.
+        # Yield from long moves so the server can keep servicing requests.
         self._on_yield = on_yield
         self._yield_interval = 50
 
@@ -61,11 +58,9 @@ class Motion:
 
         self.pen = pen if pen is not None else pen_module.Pen()
 
-        # Position tracked in microsteps from logical (0, 0).
         self.position_steps = [0, 0]
         self.homed = False
 
-        # Job state — read by /job, written by execute_*().
         self._job_state = {
             "status":   STATUS_IDLE,
             "job_id":   None,
@@ -74,10 +69,6 @@ class Motion:
             "error":    None,
         }
         self._abort_requested = False
-
-    # ------------------------------------------------------------------
-    # Public state / status
-    # ------------------------------------------------------------------
 
     def position_mm(self):
         return [self.position_steps[0] / pins.STEPS_PER_MM,
@@ -100,8 +91,7 @@ class Motion:
         }
 
     def request_abort(self):
-        """Request the running job to abort at the next yield point.
-        Safe to call from any context (e.g. from inside on_yield)."""
+        """Abort the running job at the next yield point."""
         self._abort_requested = True
 
     def reset_job_state(self):
@@ -111,10 +101,6 @@ class Motion:
         self._job_state["total_ops"] = 0
         self._job_state["error"]    = None
         self._abort_requested = False
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _yield(self):
         if self._on_yield is not None:
@@ -133,13 +119,8 @@ class Motion:
             "y_max": self._sw_y_max.value() == 0,
         }
 
-    # ------------------------------------------------------------------
-    # Raw motor primitives — internal use only
-    # ------------------------------------------------------------------
-
     def _move_open_loop(self, dA, dB, steps, half_us=None):
-        """Pulse motors with raw direction. NO switch check, NO yield, NO
-        position update. Backoffs only — keeps things simple and safe."""
+        """Pulse motors without switch checks, yields, or position updates."""
         if half_us is None:
             half_us = pins.DEFAULT_HALF_PERIOD_US
         self._dirA.value(dA)
@@ -153,8 +134,7 @@ class Motion:
             time.sleep_us(half_us)
 
     def _move_until_switch(self, dA, dB, target_switch, max_steps=20000, half_us=None):
-        """Drive in (dA, dB) direction until target_switch is pressed.
-        Aborts immediately if any *other* switch trips. Used by home()."""
+        """Drive in (dA, dB) direction until target_switch is pressed."""
         if half_us is None:
             half_us = pins.HOMING_HALF_PERIOD_US
         self._dirA.value(dA); self._dirB.value(dB)
@@ -178,10 +158,6 @@ class Motion:
             if (i % self._yield_interval) == 0:
                 self._yield()
         return ("maxsteps", max_steps)
-
-    # ------------------------------------------------------------------
-    # Public motion API
-    # ------------------------------------------------------------------
 
     def home(self):
         """Drive to top-left, set logical position to (0, 0). Pen lifted first."""
@@ -232,12 +208,11 @@ class Motion:
         nB = abs(sB)
         n = nA if nA >= nB else nB
 
-        # Bresenham-style interleaving so the slower axis pulses are evenly
-        # distributed across the faster axis's pulses.
+        # Bresenham-style interleaving keeps the slower axis evenly distributed.
         errA = n // 2
         errB = n // 2
         yi = self._yield_interval
-        yc = yi   # countdown to next yield
+        yc = yi
 
         for _ in range(n):
             if self._abort_requested:
@@ -268,7 +243,6 @@ class Motion:
                 yc = yi
                 self._yield()
 
-        # Whole move committed cleanly — advance tracked position.
         self.position_steps[0] += dx_steps
         self.position_steps[1] += dy_steps
         return n
@@ -297,10 +271,6 @@ class Motion:
         dx_steps = target_x_steps - self.position_steps[0]
         dy_steps = target_y_steps - self.position_steps[1]
         return self.move_by_steps(dx_steps, dy_steps, half_us)
-
-    # ------------------------------------------------------------------
-    # Job execution
-    # ------------------------------------------------------------------
 
     def execute_operations(self, operations, job_id=None, half_us=None):
         """Execute a toolpath produced by speech-app/toolpath.py.
@@ -344,7 +314,6 @@ class Motion:
                 elif op_type == "punch":
                     self._execute_punch(op, half_us)
                 else:
-                    # Unknown op type — skip rather than fail the whole job.
                     pass
 
             self._job_state["op_index"] = len(operations)
@@ -362,16 +331,12 @@ class Motion:
                 pass
             raise
 
-    # ----- per-op-type execution -----
-
     def _execute_draw(self, op, half_us):
         pts = op.get("points") or []
         if len(pts) < 2:
             return
-        # Travel to start of stroke (pen up so we don't smear).
         self.pen.up()
         self.move_to_mm(pts[0][0], pts[0][1], half_us)
-        # Lower pen and trace the rest of the polyline.
         self.pen.down()
         for pt in pts[1:]:
             self.move_to_mm(pt[0], pt[1], half_us)
@@ -400,10 +365,6 @@ class Motion:
             raise MotionError("Op out of Y bounds at ({}, {}): max {}".format(
                 round(x_mm, 2), round(y_mm, 2), round(pins.WORK_AREA_Y_MM, 2)))
 
-    # ------------------------------------------------------------------
-    # Calibration sweep — rare diagnostic, exposed via /calibrate
-    # ------------------------------------------------------------------
-
     def calibrate_sweep(self):
         """Home, then drive to the far rails counting steps. Returns the
         measured travel in microsteps and mm. Updates `homed` to True at the
@@ -424,10 +385,8 @@ class Motion:
             raise MotionError("X calibration failed: " + r)
         self._move_open_loop(1, 1, backoff_steps)   # -X backoff (A+ B+)
 
-        # Re-home so position state is consistent for the caller.
         self.home()
 
-        # Travel includes the home backoff distance we started from
         full_x_steps = travel_x + backoff_steps
         full_y_steps = travel_y + backoff_steps
         return {

@@ -326,12 +326,7 @@ def robot_render():
 
     payload = request_payload()
 
-    # Two payload shapes accepted:
-    #  1. {"operations": [...]} — preview modal sends what the user is
-    #     looking at directly. WYSIWYG.
-    #  2. {"text": ..., "font_family": ..., ...} — server runs the toolpath
-    #     pipeline from the params. Used by the legacy "Send Transcript"
-    #     button in the main controls.
+    # Accept either preview-generated operations or legacy toolpath params.
     operations = payload.get("operations")
     mode = str(payload.get("mode", "write")).strip() or "write"
 
@@ -369,12 +364,6 @@ def robot_render():
     )
     return jsonify(result)
 
-
-# ---------------------------------------------------------------------------
-# Direct motion control endpoints — Home / Calibrate / Jog / Move / Abort / Job
-# All return immediately; the robot queues and runs each action asynchronously.
-# Poll /robot/job for live status.
-# ---------------------------------------------------------------------------
 
 def _require_paired_robot():
     config = get_current_robot(app)
@@ -502,7 +491,6 @@ def toolpath_preview():
 
     mode = str(payload.get("mode", "write")).strip()
 
-    # Paper size
     paper_name = str(payload.get("paper_size", "A4")).strip()
     paper = get_paper_size(paper_name)
     if not paper:

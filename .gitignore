@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 speech-app/data/
 secrets.py
+.codex
+.claude

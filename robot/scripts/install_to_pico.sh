@@ -132,9 +132,7 @@ main() {
   log "mpremote timeout: ${MPREMOTE_TIMEOUT_SECONDS}s"
   log "If this hangs or fails, first confirm the board is running MicroPython and no other tool has the port open."
 
-  # Use 'resume' to skip soft-reset when entering raw REPL. This avoids
-  # re-running boot.py which re-enumerates USB (dual CDC) and kills the
-  # serial connection mid-operation.
+  # 'resume' skips the soft reset that would make boot.py re-enumerate USB mid-install.
   run_step "Checking raw REPL access on $port" \
     mpremote connect "$port" resume fs ls
 

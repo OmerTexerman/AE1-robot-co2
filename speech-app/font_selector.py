@@ -36,7 +36,7 @@ def detect_subset(text: str) -> str:
     if not counts:
         return "latin"
 
-    # Japanese/Korean get priority when present (mixed CJK text)
+    # Prefer Japanese/Korean when mixed CJK text is present.
     if counts["japanese"] > 0:
         return "japanese"
     if counts["korean"] > 0:

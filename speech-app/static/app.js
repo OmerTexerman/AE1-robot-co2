@@ -87,13 +87,11 @@ async function updateBrailleGradeOptions(language) {
       if (opt.value === "off") continue;
       opt.disabled = !grades.includes(Number(opt.value));
     }
-    // If current selection is now disabled, fall back to "off"
     if (brailleSelect.selectedOptions[0]?.disabled) {
       brailleSelect.value = "off";
       restoreBraillePreview();
     }
   } catch {
-    // On error, keep all options enabled
     for (const opt of brailleSelect.options) opt.disabled = false;
   }
 }
@@ -101,10 +99,6 @@ let activeFontPicker = null; // { triggerEl, subset, currentFamily, onSelect }
 let robotPollTimer = null;
 let robotStateRequestInFlight = false;
 let robotStateMutationVersion = 0;
-
-// Job-status polling — separate from the periodic /robot status poll above.
-// Driven by Home/Calibrate/Send actions and runs at ~2 Hz until the robot
-// reaches a terminal status (complete/failed/aborted/idle).
 let robotJobPollTimer = null;
 let robotJobInFlight = false;
 let robotJobInPreviewMode = false;   // true while live-tracking on the preview canvas
@@ -359,8 +353,6 @@ async function openFontPicker(triggerEl, subset, currentFamily, onSelect, { hers
 
   const cached = await getFontsForSubset(subset);
   const fonts = [...cached];
-  // Ensure current font is in the list without mutating cache
-  // (skip for Hershey fonts — they appear in their own section)
   if (currentFamily && !hersheyFonts.includes(currentFamily) && !fonts.some((f) => f.family === currentFamily)) {
     fonts.unshift({ family: currentFamily, category: "" });
   }
@@ -389,7 +381,6 @@ fontPickerList.addEventListener("click", (e) => {
   const family = item.dataset.family;
   activeFontPicker.currentFamily = family;
   activeFontPicker.onSelect(family);
-  // Update trigger label
   const label = activeFontPicker.triggerEl.querySelector(".font-trigger-label");
   if (label) label.textContent = family;
   closeFontPicker();
@@ -542,11 +533,9 @@ function syncRobotControls() {
   sendTranscriptButton.disabled = !canSendTranscript;
   homeRobotButton.disabled = !canControlMotion;
   calibrateRobotButton.disabled = !canControlMotion;
-  // Abort is enabled only while a job is actively running — toggled in updateRobotJobUi.
   if (!robotJobInFlight) abortRobotButton.disabled = true;
-  // Preview Send button is enabled only when there's a preview AND a connected robot AND no job running.
   if (previewSendButton) {
-    const hasPreview = Boolean(currentPreviewData && currentPreviewData.operations && currentPreviewData.operations.length);
+    const hasPreview = Boolean(currentPreviewData?.operations?.length);
     previewSendButton.disabled = !(hasPreview && Boolean(pairedRobot) && robotConnected && !robotJobInFlight);
   }
   updateHistoryActionButtons();
@@ -611,9 +600,8 @@ function renderRobotState(payload, options = {}) {
   syncRobotControls();
   scheduleRobotPoll();
 
-  // If the robot has a job in progress (e.g. page reload mid-draw), resume
-  // job-status polling so the indicator picks up where it left off.
-  const motionStatus = payload.status && payload.status.motion && payload.status.motion.status;
+  // Resume polling after reload if the robot is already busy.
+  const motionStatus = payload.status?.motion?.status;
   if ((motionStatus === "running" || motionStatus === "queued") && !robotJobInFlight) {
     startJobPolling();
   }
@@ -841,10 +829,6 @@ async function sendTranscriptToRobot() {
   await sendTranscriptPayloadToRobot(getCurrentTranscript());
 }
 
-// ---------------------------------------------------------------------------
-// Robot motion control: home / calibrate / abort + job-status polling
-// ---------------------------------------------------------------------------
-
 function stopJobPolling() {
   if (robotJobPollTimer !== null) {
     window.clearTimeout(robotJobPollTimer);
@@ -861,7 +845,7 @@ async function pollRobotJob() {
   try {
     data = await fetchJson("/robot/job");
   } catch (e) {
-    // Transient error — retry after a backoff. Don't tear down state.
+    // Transient error: retry without tearing down UI state.
     robotJobPollTimer = window.setTimeout(pollRobotJob, 1500);
     return;
   }
@@ -895,7 +879,6 @@ function startJobPolling({ inPreviewMode = false } = {}) {
 }
 
 function updateRobotJobUi(data) {
-  // Robot section indicator
   if (!data || data.status === "idle" || !data.status) {
     robotJobIndicator.hidden = true;
     robotJobIndicator.textContent = "";
@@ -914,10 +897,8 @@ function updateRobotJobUi(data) {
     }
   }
 
-  // Abort button: only meaningful while a motion job is actively running.
   abortRobotButton.disabled = !(data && data.status === "running");
 
-  // Preview modal status line (if modal is open)
   if (previewModal.style.display !== "none" && previewJobStatus) {
     if (!data || data.status === "idle") {
       previewJobStatus.hidden = true;
@@ -947,7 +928,6 @@ function updateRobotJobUi(data) {
 function updatePreviewWithLiveRobot(data) {
   if (!previewAnimationState || !currentPreviewData) return;
   const opIdx = Math.max(0, Math.min(data.op_index || 0, currentPreviewData.operations.length));
-  // Mark all ops up to opIdx as completed.
   previewAnimationState.completedOps = currentPreviewData.operations.slice(0, opIdx).map((op) => ({
     type: op.type,
     points: op.points,
@@ -1049,8 +1029,7 @@ async function sendPreviewToRobot() {
     return;
   }
 
-  // Switch the canvas from auto-animation to live-tracking. Reset visible
-  // state so polling fills it in op-by-op as the robot actually draws.
+  // Switch from canned animation to live robot tracking.
   stopPreviewAnimation();
   if (previewAnimationState) {
     previewAnimationState.completedOps = [];
@@ -1170,9 +1149,6 @@ historyList.addEventListener("click", (event) => {
     return;
   }
 
-  // Braille picker is handled in the "change" listener below
-
-
   const trigger = event.target.closest(".font-trigger[data-history-id]");
   if (trigger) {
     const id = trigger.dataset.historyId || "";
@@ -1224,7 +1200,6 @@ historyList.addEventListener("change", (event) => {
         .finally(() => { braillePicker.disabled = false; });
     }
 
-    // Sync the top-level braille selector if this is the current transcript
     if (currentTranscriptId === id) {
       brailleSelect.value = String(grade === "off" ? "off" : grade);
       if (grade === "off") {
@@ -1261,7 +1236,6 @@ transcriptFontTrigger.addEventListener("click", () => {
       if (currentTranscriptId) {
         applyFontChange(currentTranscriptId, family);
       } else {
-        // Pre-apply font to transcript area for next recording
         const url = buildGoogleFontsUrl(family);
         ensureFont(family, url);
         transcript.style.fontFamily = cssFontFamily(family);
@@ -1314,13 +1288,11 @@ brailleSelect.addEventListener("change", () => {
   } else {
     restoreBraillePreview();
   }
-  // Sync to current transcript's history item and history braille picker
   if (currentTranscriptId) {
     const grade = brailleActive() ? brailleGrade() : "off";
     updateHistoryItem(currentTranscriptId, { braille_grade: grade });
     const historyBraille = historyList.querySelector(`.braille-picker[data-history-id="${currentTranscriptId}"]`);
     if (historyBraille) historyBraille.value = String(grade === "off" ? "off" : grade);
-    // Also update the history item's displayed text
     const item = findTranscriptInHistory(currentTranscriptId);
     const textEl = historyList.querySelector(`[data-history-text-id="${currentTranscriptId}"]`);
     if (item && textEl) {
@@ -1338,8 +1310,6 @@ brailleSelect.addEventListener("change", () => {
     }
   }
 });
-
-// ── Preview Modal ──
 
 let previewAnimationState = null;
 let previewDebounceTimer = null;
@@ -1471,7 +1441,6 @@ async function fetchPreview(item) {
     previewStats.textContent = err.message || "Preview failed.";
     currentPreviewData = null;
   }
-  // Re-evaluate Send button state once preview load resolves.
   syncRobotControls();
 }
 
@@ -1488,8 +1457,6 @@ function renderPreviewStats(data) {
   }
 }
 
-// ── Animated Canvas Rendering ──
-
 function startPreviewAnimation(data) {
   stopPreviewAnimation();
 
@@ -1497,7 +1464,6 @@ function startPreviewAnimation(data) {
   const ctx = canvas.getContext("2d");
   const paper = data.paper;
 
-  // Scale to fit canvas with padding
   const padding = 20;
   const scaleX = (canvas.width - 2 * padding) / paper.width;
   const scaleY = (canvas.height - 2 * padding) / paper.height;
@@ -1509,7 +1475,6 @@ function startPreviewAnimation(data) {
     return [offsetX + x * scale, offsetY + y * scale];
   }
 
-  // Flatten all operations into segments for animation
   const ops = data.operations || [];
   const segments = [];
   for (const op of ops) {
@@ -1546,7 +1511,6 @@ function startPreviewAnimation(data) {
     toCanvas,
     totalLength,
     penTipPx,
-    // Track completed items for persistent rendering
     completedOps: [],
     toolheadPos: null,
     animFrameId: null,
@@ -1609,7 +1573,6 @@ function advanceAnimation(state, advanceMm) {
       state.currentSegProgress = 0;
     } else {
       state.currentSegProgress += remaining;
-      // Find interpolated position
       state.toolheadPos = interpolateAlongPath(seg.points, state.currentSegProgress / segLen);
       remaining = 0;
     }
@@ -1652,7 +1615,6 @@ function drawFrame(ctx, canvas, state) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const { toCanvas, paper, margins } = state;
 
-  // Draw paper
   const [px0, py0] = toCanvas(0, 0);
   const [px1, py1] = toCanvas(paper.width, paper.height);
   ctx.fillStyle = "white";
@@ -1661,7 +1623,6 @@ function drawFrame(ctx, canvas, state) {
   ctx.lineWidth = 1;
   ctx.strokeRect(px0, py0, px1 - px0, py1 - py0);
 
-  // Draw margin guides (dashed)
   ctx.setLineDash([4, 4]);
   ctx.strokeStyle = "#ccc";
   ctx.lineWidth = 0.5;
@@ -1670,7 +1631,6 @@ function drawFrame(ctx, canvas, state) {
   ctx.strokeRect(mx0, my0, mx1 - mx0, my1 - my0);
   ctx.setLineDash([]);
 
-  // --- Ink layer: shows expected pen output on paper ---
   if (state.penTipPx > 0.5) {
     for (const op of state.completedOps) {
       if (op.type === "draw") drawInkPath(ctx, state, op.points);
@@ -1685,7 +1645,6 @@ function drawFrame(ctx, canvas, state) {
     }
   }
 
-  // --- Toolpath layer: shows pen movement ---
   for (const op of state.completedOps) {
     if (op.type === "travel") {
       drawTravelPath(ctx, state, op.points);
@@ -1696,7 +1655,6 @@ function drawFrame(ctx, canvas, state) {
     }
   }
 
-  // Draw current in-progress segment
   if (!state.done && state.currentSegIndex < state.segments.length) {
     const seg = state.segments[state.currentSegIndex];
     if ((seg.type === "travel" || seg.type === "draw") && seg.length > 0) {
@@ -1710,7 +1668,6 @@ function drawFrame(ctx, canvas, state) {
     }
   }
 
-  // Draw toolhead
   if (state.toolheadPos) {
     const [tx, ty] = toCanvas(state.toolheadPos[0], state.toolheadPos[1]);
     ctx.beginPath();
@@ -1778,7 +1735,6 @@ function drawDrawPath(ctx, state, points) {
     const [x, y] = state.toCanvas(points[i][0], points[i][1]);
     ctx.lineTo(x, y);
   }
-  // If ink layer is visible, draw toolpath as a subtle colored line
   if (state.penTipPx > 0.5) {
     ctx.strokeStyle = "rgba(220, 50, 50, 0.5)";
     ctx.lineWidth = 0.8;
@@ -1825,7 +1781,6 @@ function stopPreviewAnimation() {
 function skipPreviewAnimation() {
   if (!previewAnimationState || !currentPreviewData) return;
   stopPreviewAnimation();
-  // Render final state instantly
   const canvas = previewCanvas;
   const ctx = canvas.getContext("2d");
   const data = currentPreviewData;
@@ -1852,7 +1807,6 @@ function skipPreviewAnimation() {
     currentSegProgress: 0,
   };
 
-  // Find last position
   const ops = data.operations || [];
   for (let i = ops.length - 1; i >= 0; i--) {
     if (ops[i].type === "punch") {
@@ -1872,10 +1826,8 @@ function skipPreviewAnimation() {
 }
 
 function pxToMm(px) {
-  // Convert CSS px to physical mm for robot writing.
-  // At 96 DPI, 1px = 0.2646mm. We use 0.25 for a clean mapping:
-  // 14px -> 3.5mm, 20px -> 5mm, 40px -> 10mm
-  return Math.round(px * 0.25 * 2) / 2; // round to nearest 0.5
+  // Use 0.25 mm/px so the preset sizes map cleanly.
+  return Math.round(px * 0.25 * 2) / 2;
 }
 
 function itemBrailleActive(item) {
@@ -1888,12 +1840,10 @@ function openPreviewModal(item) {
 
   const isBraille = itemBrailleActive(item);
 
-  // Sync font size from transcript item
   if (item.font_size) {
     previewFontSize.value = pxToMm(item.font_size);
   }
 
-  // Set up font trigger for modal
   const fontLabel = previewFontTrigger.closest("label");
   if (isBraille) {
     if (fontLabel) fontLabel.style.display = "none";
@@ -1903,7 +1853,6 @@ function openPreviewModal(item) {
     previewFontTrigger.dataset.subset = item.script || "latin";
   }
 
-  // Hide render mode selector for braille
   const renderModeLabel = previewRenderMode.closest("label");
   const fontSizeLabel = previewFontSize.closest("label");
   const penTipLabel = previewPenTip.closest("label");
@@ -1934,8 +1883,6 @@ function debouncedRefreshPreview() {
     fetchPreview(previewTranscriptItem);
   }, 300);
 }
-
-// Modal event listeners
 previewModalClose.addEventListener("click", closePreviewModal);
 previewModal.addEventListener("click", (e) => {
   if (e.target === previewModal) closePreviewModal();
@@ -1944,7 +1891,6 @@ previewModal.addEventListener("click", (e) => {
 previewPlayPause.addEventListener("click", () => {
   if (!previewAnimationState) return;
   if (previewAnimationState.done) {
-    // Restart
     if (currentPreviewData) startPreviewAnimation(currentPreviewData);
     return;
   }
@@ -1984,8 +1930,6 @@ previewPaperSize.addEventListener("change", () => {
   customPaperFields.style.display = previewPaperSize.value === "Custom" ? "" : "none";
   debouncedRefreshPreview();
 });
-
-// Parameter change listeners
 for (const el of [
   previewPaperWidth, previewPaperHeight, previewRenderMode,
   previewFontSize, previewPenTip,
@@ -1995,8 +1939,6 @@ for (const el of [
   el.addEventListener("change", debouncedRefreshPreview);
   el.addEventListener("input", debouncedRefreshPreview);
 }
-
-// Modal font picker trigger
 previewFontTrigger.addEventListener("click", () => {
   const subset = previewFontTrigger.dataset.subset || "latin";
   const currentFamily = previewFontValue.value;
@@ -2004,8 +1946,6 @@ previewFontTrigger.addEventListener("click", () => {
     hersheyFonts: cachedHersheyFonts || [],
   });
 });
-
-// ── Intercept Send-to-Robot clicks to open modal ──
 
 function handleSendToRobot(item) {
   if (!item) {

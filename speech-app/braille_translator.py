@@ -1,8 +1,7 @@
 import louis
 
 
-# Grade 1: try "{lang}.tbl" dynamically; override where the
-# ISO 639-1 code doesn't match an available .tbl filename.
+# Grade 1: try "{lang}.tbl" first, with overrides for mismatched table names.
 _G1_OVERRIDES: dict[str, str] = {
     "en": "en-ueb-g1.ctb",
     "zh": "zh_CHN.tbl",
@@ -15,7 +14,7 @@ _G1_OVERRIDES: dict[str, str] = {
     "nl": "nl-NL-g0.utb",
 }
 
-# Grade 2: only languages that ship a dedicated contracted table.
+# Grade 2 is only available where liblouis ships a dedicated contracted table.
 _G2_TABLE: dict[str, str] = {
     "en": "en-ueb-g2.ctb",
     "fr": "fr-bfu-g2.ctb",

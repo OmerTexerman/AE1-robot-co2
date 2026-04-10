@@ -16,7 +16,7 @@ from paper_sizes import DEFAULT_FONT_SIZE_MM, DEFAULT_MARGINS, DEFAULT_PEN_TIP_M
 
 logger = logging.getLogger(__name__)
 
-# Braille cell dimensions (mm)
+# Braille layout constants in millimeters.
 BRAILLE_DOT_SPACING = 2.5
 BRAILLE_CELL_WIDTH = 6.0
 BRAILLE_CELL_HEIGHT = 10.0
@@ -127,7 +127,6 @@ def _word_wrap_glyphs(words_glyphs, max_width):
         return chunks
 
     for word_glyphs, word_width, word_space_width in words_glyphs:
-        # If the word itself is wider than the available width, break it
         if word_width > max_width:
             if current_line:
                 lines.append(current_line)
@@ -186,7 +185,6 @@ def generate_write_toolpath(
 
     if use_hershey:
         metrics = get_hershey_metrics(font_family, font_size_mm)
-        # Hershey fonts are already single-stroke, force render_mode
         render_mode = "outline"
     else:
         ttf_path = get_ttf_path(font_family)
@@ -195,10 +193,8 @@ def generate_write_toolpath(
     line_height = metrics["line_height"]
     ascender = metrics["ascender"]
 
-    # Split text into paragraphs then words
     paragraphs = text.split("\n")
 
-    # Select glyph extraction function based on render mode and font type
     def extract_glyphs(text_str):
         if use_hershey:
             return get_hershey_glyphs(font_family, text_str, font_size_mm)
@@ -207,7 +203,6 @@ def generate_write_toolpath(
         else:
             return get_glyph_outlines(ttf_path, text_str, font_size_mm)
 
-    # Shape each word and measure advance widths
     all_paragraph_words = []
     for para in paragraphs:
         words = para.split()
@@ -215,7 +210,6 @@ def generate_write_toolpath(
             all_paragraph_words.append([])
             continue
 
-        # Space width
         space_glyphs = extract_glyphs(" ")
         space_width = space_glyphs[0].advance if space_glyphs else font_size_mm * 0.3
 
@@ -227,7 +221,6 @@ def generate_write_toolpath(
 
         all_paragraph_words.append(word_data)
 
-    # Phase 1: Collect all paths
     all_paths = []
     cursor_y = top + offset_y + ascender
 
@@ -253,7 +246,6 @@ def generate_write_toolpath(
                         if len(translated) >= 2:
                             all_paths.append(translated)
 
-                    # Add hatch fill if filled mode
                     if render_mode == "filled" and glyph.paths:
                         hatch = hatch_fill(glyph.paths, pen_tip_mm)
                         for hatch_path in hatch:
@@ -263,17 +255,14 @@ def generate_write_toolpath(
 
                     cursor_x += glyph.advance
 
-                # Add space between words
                 cursor_x += space_width
 
             cursor_y += line_height
 
-    # Phase 2: Optimize path ordering
     if optimize and all_paths:
         all_paths = _reorder_paths_nearest_neighbor(all_paths)
         all_paths = _merge_nearby_endpoints(all_paths, max(pen_tip_mm * 0.5, 0.1))
 
-    # Phase 3: Emit operations and compute stats
     operations = []
     last_point = None
     draw_distance = 0
@@ -292,7 +281,6 @@ def generate_write_toolpath(
             max_x = max(max_x, pt[0])
             max_y = max(max_y, pt[1])
 
-        # Travel to start of path
         start = path[0]
         if last_point and last_point != start:
             travel_pts = [list(last_point), list(start)]
@@ -300,7 +288,6 @@ def generate_write_toolpath(
             travel_distance += _distance(last_point, start)
             travel_count += 1
 
-        # Draw the path
         draw_pts = [list(pt) for pt in path]
         operations.append({"type": "draw", "points": draw_pts})
         draw_distance += _path_length(path)
@@ -355,7 +342,6 @@ def generate_braille_toolpath(
 
     cells = translate_to_braille(text, language, grade)
 
-    # Split cells into words (empty cell = space)
     words = []
     current_word = []
     for cell in cells:
@@ -368,7 +354,6 @@ def generate_braille_toolpath(
     if current_word:
         words.append(current_word)
 
-    # Word wrap braille
     wrapped_lines = []
     current_line = []
     current_width = 0
@@ -389,7 +374,6 @@ def generate_braille_toolpath(
     if current_line:
         wrapped_lines.append(current_line)
 
-    # Phase 1: Collect all dot positions
     all_dots = []
     cursor_y = top + offset_y
 
@@ -426,11 +410,9 @@ def generate_braille_toolpath(
 
         cursor_y += BRAILLE_CELL_HEIGHT
 
-    # Phase 2: Optimize dot ordering
     if optimize and all_dots:
         all_dots = _reorder_points_nearest_neighbor(all_dots)
 
-    # Phase 3: Emit operations and compute stats
     operations = []
     last_point = None
     travel_distance = 0
@@ -449,7 +431,6 @@ def generate_braille_toolpath(
         max_x = max(max_x, px)
         max_y = max(max_y, py)
 
-        # Travel to dot position
         if last_point:
             travel_pts = [list(last_point), point]
             operations.append({"type": "travel", "points": travel_pts})
@@ -458,7 +439,6 @@ def generate_braille_toolpath(
             operations.append({"type": "travel", "points": [[0, 0], point]})
             travel_distance += _distance((0, 0), point)
 
-        # Punch
         operations.append({"type": "punch", "point": point})
         punch_count += 1
         last_point = point

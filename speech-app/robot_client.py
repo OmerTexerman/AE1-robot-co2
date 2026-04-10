@@ -20,9 +20,6 @@ except ImportError:
 
 DEFAULT_PORT = 8080
 REQUEST_TIMEOUT_SECONDS = 4
-# Status polls and quick commands use the default timeout above. Render jobs
-# return immediately with a job_id (the firmware queues + executes async),
-# so they also don't need a long timeout.
 SERIAL_TIMEOUT_SECONDS = 2
 DISCOVERY_PORT = 9090
 DISCOVERY_MAGIC = "AE1_DISCOVERY_V1"
@@ -40,10 +37,6 @@ DEFAULT_DEVICE_ID = "unknown"
 class RobotClientError(RuntimeError):
     pass
 
-
-# ---------------------------------------------------------------------------
-# Transport abstraction
-# ---------------------------------------------------------------------------
 
 class Transport(ABC):
     @abstractmethod
@@ -168,10 +161,6 @@ def close_transport(config: dict) -> None:
         transport.close()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _robot_key(robot: dict) -> str:
     return f"{robot['host']}:{robot['port']}"
 
@@ -199,10 +188,6 @@ def auth_headers(config: dict) -> dict[str, str] | None:
         return None
     return {"X-Pair-Token": token}
 
-
-# ---------------------------------------------------------------------------
-# High-level robot operations (transport-aware)
-# ---------------------------------------------------------------------------
 
 def pair_robot(host: str, port: int, pairing_code: str, client_name: str) -> dict:
     base_url = build_base_url(host, port)
@@ -262,9 +247,7 @@ def unpair_robot(config: dict) -> dict:
 
 
 def send_paths_job(config: dict, operations: list, mode: str = "write") -> dict:
-    """Send a pre-generated toolpath (list of {type, points|point} ops in mm)
-    to the robot. The robot queues it, runs it asynchronously, and the caller
-    polls fetch_job_status() for progress."""
+    """Queue a pre-generated toolpath on the robot."""
     return _transport_request(config, "POST", "/render", json_body={
         "mode": mode,
         "operations": operations,
@@ -273,19 +256,17 @@ def send_paths_job(config: dict, operations: list, mode: str = "write") -> dict:
 
 
 def send_home_command(config: dict) -> dict:
-    """Queue a homing job. Returns immediately with {job_id}."""
+    """Queue a homing job."""
     return _transport_request(config, "POST", "/home")
 
 
 def send_calibrate_command(config: dict) -> dict:
-    """Queue a full calibration sweep. Returns immediately with {job_id}.
-    Final results are available via fetch_job_status() once status==complete
-    (look for the 'result' key)."""
+    """Queue a full calibration sweep."""
     return _transport_request(config, "POST", "/calibrate")
 
 
 def send_jog_command(config: dict, dx_mm: float, dy_mm: float) -> dict:
-    """Queue a relative jog by (dx, dy) mm."""
+    """Queue a relative jog."""
     return _transport_request(config, "POST", "/jog", json_body={
         "dx": dx_mm,
         "dy": dy_mm,
@@ -293,7 +274,7 @@ def send_jog_command(config: dict, dx_mm: float, dy_mm: float) -> dict:
 
 
 def send_move_command(config: dict, x_mm: float, y_mm: float) -> dict:
-    """Queue an absolute move to (x, y) mm in machine coordinates."""
+    """Queue an absolute move."""
     return _transport_request(config, "POST", "/move", json_body={
         "x": x_mm,
         "y": y_mm,
@@ -301,13 +282,12 @@ def send_move_command(config: dict, x_mm: float, y_mm: float) -> dict:
 
 
 def send_abort_command(config: dict) -> dict:
-    """Request the running job to abort at the next yield point."""
+    """Request the running job to abort."""
     return _transport_request(config, "POST", "/job/abort")
 
 
 def fetch_job_status(config: dict) -> dict:
-    """Poll current job/motion status. Cheap call (~50ms even mid-job).
-    Returns the motion controller's full state dict."""
+    """Fetch the current job or motion state."""
     return _transport_request(config, "GET", "/job")
 
 
@@ -445,7 +425,7 @@ def probe_networks() -> list[ipaddress.IPv4Network]:
     for config in interface_ipv4_configs():
         network = config["network"]
 
-        # Avoid unbounded scans on large networks. Reduce to the interface's /24.
+        # Cap broad networks at /24 to keep active probing bounded.
         if network.prefixlen < 24:
             network = ipaddress.IPv4Interface(f"{config['address']}/24").network
 
@@ -507,7 +487,7 @@ def active_hello_probe(candidate_ports: list[int] | None = None) -> list[dict]:
             if robot is None:
                 continue
             discovered[_robot_key(robot)] = robot
-            # One robot found is enough — cancel remaining probes
+            # One positive response is enough for the active probe fallback.
             for pending in futures:
                 pending.cancel()
             break
@@ -525,16 +505,12 @@ def _pick_data_port(pico_ports: list) -> str | None:
     if not pico_ports:
         return None
 
-    # Group by serial number (one physical Pico = one serial number)
     by_serial: dict[str, list] = {}
     for p in pico_ports:
         key = p.serial_number or p.device
         by_serial.setdefault(key, []).append(p)
 
-    # For each Pico, pick the data port:
-    # - The REPL port is labeled interface="Board CDC" by MicroPython
-    # - The data CDC port has interface=None
-    # - If there's only one port (no dual CDC), skip it — that's just the REPL
+    # Prefer the non-REPL CDC port when dual CDC is enabled.
     for ports in by_serial.values():
         if len(ports) < 2:
             continue

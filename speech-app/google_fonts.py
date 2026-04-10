@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 _cache_lock = threading.Lock()
 _cached_fonts: list[dict] | None = None
 _cache_timestamp: float = 0
-_CACHE_TTL = 24 * 60 * 60  # 24 hours
+_CACHE_TTL = 24 * 60 * 60
 DEFAULT_FONT_FAMILY = "Noto Sans"
 
 
@@ -26,7 +26,6 @@ def _fetch_fonts() -> list[dict]:
         timeout=15,
     )
     resp.raise_for_status()
-    # Keep fields we use: family, subsets, category, and TTF URL for font rendering
     return [
         {
             "family": f["family"],
@@ -46,7 +45,7 @@ def _get_cached_fonts() -> list[dict]:
             return _cached_fonts
         stale = _cached_fonts
 
-    # Fetch outside the lock to avoid blocking concurrent requests for up to 15s
+    # Fetch outside the lock so slow API calls do not block other requests.
     try:
         fonts = _fetch_fonts()
     except Exception:
