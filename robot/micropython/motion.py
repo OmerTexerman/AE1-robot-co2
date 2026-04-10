@@ -22,6 +22,7 @@ Kinematics — empirically verified during bring-up (2026-04-09):
 
 from machine import Pin
 import time
+import ujson
 
 import pins
 import pen as pen_module
@@ -60,6 +61,15 @@ class Motion:
 
         self.position_steps = [0, 0]
         self.homed = False
+        self.calibrated = False
+
+        # Calibration data — loaded from flash or populated by calibrate_sweep().
+        # None until the first successful calibration.
+        self.travel_x_mm = None
+        self.travel_y_mm = None
+        self.work_area_x_mm = None
+        self.work_area_y_mm = None
+        self._load_calibration()
 
         self._job_state = {
             "status":   STATUS_IDLE,
@@ -70,6 +80,35 @@ class Motion:
         }
         self._abort_requested = False
 
+    def _load_calibration(self):
+        """Try to load saved calibration from flash. Non-fatal if missing."""
+        try:
+            with open(pins.CALIBRATION_PATH, "r") as f:
+                data = ujson.load(f)
+            tx = data.get("travel_x_mm")
+            ty = data.get("travel_y_mm")
+            if tx is not None and ty is not None:
+                self._apply_calibration(float(tx), float(ty))
+        except (OSError, ValueError, KeyError):
+            pass
+
+    def _save_calibration(self, travel_x_mm, travel_y_mm):
+        """Persist calibration to flash so it survives power cycles."""
+        data = {
+            "travel_x_mm": travel_x_mm,
+            "travel_y_mm": travel_y_mm,
+            "steps_per_mm": pins.STEPS_PER_MM,
+        }
+        with open(pins.CALIBRATION_PATH, "w") as f:
+            ujson.dump(data, f)
+
+    def _apply_calibration(self, travel_x_mm, travel_y_mm):
+        self.travel_x_mm = travel_x_mm
+        self.travel_y_mm = travel_y_mm
+        self.work_area_x_mm = travel_x_mm - pins.HOME_BACKOFF_MM - pins.SOFT_LIMIT_MARGIN_MM
+        self.work_area_y_mm = travel_y_mm - pins.HOME_BACKOFF_MM - pins.SOFT_LIMIT_MARGIN_MM
+        self.calibrated = True
+
     def position_mm(self):
         return [self.position_steps[0] / pins.STEPS_PER_MM,
                 self.position_steps[1] / pins.STEPS_PER_MM]
@@ -78,7 +117,7 @@ class Motion:
         total = self._job_state["total_ops"]
         op_idx = self._job_state["op_index"]
         progress_pct = round(100.0 * op_idx / total, 1) if total else 0.0
-        return {
+        status = {
             "status":       self._job_state["status"],
             "job_id":       self._job_state["job_id"],
             "op_index":     op_idx,
@@ -86,9 +125,13 @@ class Motion:
             "progress_pct": progress_pct,
             "position_mm":  self.position_mm(),
             "homed":        self.homed,
+            "calibrated":   self.calibrated,
             "pen":          self.pen.state,
             "error":        self._job_state["error"],
         }
+        if self.calibrated:
+            status["work_area_mm"] = [self.work_area_x_mm, self.work_area_y_mm]
+        return status
 
     def request_abort(self):
         """Abort the running job at the next yield point."""
@@ -259,12 +302,14 @@ class Motion:
         repeated small moves don't accumulate rounding error."""
         if not self.homed:
             raise MotionError("Cannot move_to: robot is not homed")
-        if not (0 <= x_mm <= pins.WORK_AREA_X_MM):
+        if not self.calibrated:
+            raise MotionError("Cannot move_to: robot is not calibrated")
+        if not (0 <= x_mm <= self.work_area_x_mm):
             raise MotionError("X out of bounds: {} (range 0..{})".format(
-                round(x_mm, 2), round(pins.WORK_AREA_X_MM, 2)))
-        if not (0 <= y_mm <= pins.WORK_AREA_Y_MM):
+                round(x_mm, 2), round(self.work_area_x_mm, 2)))
+        if not (0 <= y_mm <= self.work_area_y_mm):
             raise MotionError("Y out of bounds: {} (range 0..{})".format(
-                round(y_mm, 2), round(pins.WORK_AREA_Y_MM, 2)))
+                round(y_mm, 2), round(self.work_area_y_mm, 2)))
 
         target_x_steps = int(round(x_mm * pins.STEPS_PER_MM))
         target_y_steps = int(round(y_mm * pins.STEPS_PER_MM))
@@ -286,6 +331,8 @@ class Motion:
         """
         if not self.homed:
             raise MotionError("Cannot execute: robot is not homed")
+        if not self.calibrated:
+            raise MotionError("Cannot execute: robot is not calibrated")
 
         # Pre-validate so we don't half-draw and then fault.
         for op in operations:
@@ -358,12 +405,14 @@ class Motion:
         self.pen.punch()
 
     def _check_bounds(self, x_mm, y_mm):
-        if not (0 <= x_mm <= pins.WORK_AREA_X_MM):
+        if not self.calibrated:
+            raise MotionError("Cannot check bounds: robot is not calibrated")
+        if not (0 <= x_mm <= self.work_area_x_mm):
             raise MotionError("Op out of X bounds at ({}, {}): max {}".format(
-                round(x_mm, 2), round(y_mm, 2), round(pins.WORK_AREA_X_MM, 2)))
-        if not (0 <= y_mm <= pins.WORK_AREA_Y_MM):
+                round(x_mm, 2), round(y_mm, 2), round(self.work_area_x_mm, 2)))
+        if not (0 <= y_mm <= self.work_area_y_mm):
             raise MotionError("Op out of Y bounds at ({}, {}): max {}".format(
-                round(x_mm, 2), round(y_mm, 2), round(pins.WORK_AREA_Y_MM, 2)))
+                round(x_mm, 2), round(y_mm, 2), round(self.work_area_y_mm, 2)))
 
     def calibrate_sweep(self):
         """Home, then drive to the far rails counting steps. Returns the
@@ -389,10 +438,20 @@ class Motion:
 
         full_x_steps = travel_x + backoff_steps
         full_y_steps = travel_y + backoff_steps
+        travel_x_mm = full_x_steps / pins.STEPS_PER_MM
+        travel_y_mm = full_y_steps / pins.STEPS_PER_MM
+
+        # Persist to flash and update live state so the work area is
+        # immediately available without a reboot.
+        self._save_calibration(travel_x_mm, travel_y_mm)
+        self._apply_calibration(travel_x_mm, travel_y_mm)
+
         return {
             "travel_x_steps": full_x_steps,
             "travel_y_steps": full_y_steps,
-            "travel_x_mm":    full_x_steps / pins.STEPS_PER_MM,
-            "travel_y_mm":    full_y_steps / pins.STEPS_PER_MM,
+            "travel_x_mm":    travel_x_mm,
+            "travel_y_mm":    travel_y_mm,
+            "work_area_x_mm": self.work_area_x_mm,
+            "work_area_y_mm": self.work_area_y_mm,
             "steps_per_mm":   pins.STEPS_PER_MM,
         }

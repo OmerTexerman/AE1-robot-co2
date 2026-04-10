@@ -209,8 +209,10 @@ def hello_payload(ip_address, state):
         "serial_framing": True,
     }
     if _motion is not None:
-        payload["work_area_mm"] = [pins.WORK_AREA_X_MM, pins.WORK_AREA_Y_MM]
         payload["steps_per_mm"] = pins.STEPS_PER_MM
+        payload["calibrated"] = _motion.calibrated
+        if _motion.calibrated:
+            payload["work_area_mm"] = [_motion.work_area_x_mm, _motion.work_area_y_mm]
     return payload
 
 
@@ -225,6 +227,8 @@ def _set_pending_job(action, payload, kind):
         return None, "robot is busy"
     if not _motion.homed and kind not in ("home", "calibrate"):
         return None, "robot is not homed"
+    if not _motion.calibrated and kind not in ("home", "calibrate"):
+        return None, "robot is not calibrated — run /calibrate first"
 
     job_id = make_job_id(kind)
     # Let /job reflect the queued state immediately.
@@ -313,7 +317,8 @@ def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=F
         }
         if _motion is not None:
             body["motion"] = _motion.get_status()
-            body["work_area_mm"] = [pins.WORK_AREA_X_MM, pins.WORK_AREA_Y_MM]
+            if _motion.calibrated:
+                body["work_area_mm"] = [_motion.work_area_x_mm, _motion.work_area_y_mm]
         return 200, body
 
     if method == "POST" and path == "/unpair":
@@ -727,8 +732,11 @@ def serve():
             serial_buf = drain_serial(cdc_data, serial_buf, ip_address)
 
     _motion = Motion(on_yield=lambda: service_io(0))
-    log("motion controller ready: work_area={}x{}mm steps_per_mm={}".format(
-        round(pins.WORK_AREA_X_MM, 1), round(pins.WORK_AREA_Y_MM, 1), pins.STEPS_PER_MM))
+    if _motion.calibrated:
+        log("motion controller ready: work_area={}x{}mm steps_per_mm={}".format(
+            round(_motion.work_area_x_mm, 1), round(_motion.work_area_y_mm, 1), pins.STEPS_PER_MM))
+    else:
+        log("motion controller ready: NOT CALIBRATED — run /calibrate before sending jobs")
 
     while True:
         if _pending_job is not None:
