@@ -1,13 +1,142 @@
-"""Mock robot server that mimics the Pico 2 W HTTP API for testing."""
+"""Mock robot server that mimics the Pico 2 W HTTP API for testing.
+
+Implements the new motion-control API surface (home / calibrate / jog / move
+/ render / job / job/abort) so the speech-app UI can be exercised end-to-end
+without real hardware. Job progress is faked by advancing op_index over time
+in a background thread, so the live-cursor preview tracking has plausible
+data to render.
+"""
 
 import json
+import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 DEVICE_NAME = "MockPico2W"
 DEVICE_ID = "mock-pico-001"
+LISTEN_PORT = 8080
+
+# Geometry-ish constants matching the real Pico's pins.py defaults
+WORK_AREA_X_MM = 247.0
+WORK_AREA_Y_MM = 205.0
+STEPS_PER_MM = 40
+
+# Single global motion state — same shape as the real firmware's get_status()
+MOTION_LOCK = threading.Lock()
+MOTION = {
+    "status": "idle",
+    "kind": None,
+    "job_id": None,
+    "op_index": 0,
+    "total_ops": 0,
+    "progress_pct": 0.0,
+    "position_mm": [0.0, 0.0],
+    "homed": False,
+    "pen": "up",
+    "error": None,
+    "result": None,
+}
+ABORT_REQUESTED = False
 PAIRED_CLIENTS = {}
-JOBS = {}
+
+
+def _set_motion(**fields):
+    with MOTION_LOCK:
+        MOTION.update(fields)
+
+
+def _snapshot():
+    with MOTION_LOCK:
+        return dict(MOTION)
+
+
+def _run_fake_job(kind, payload):
+    """Background thread that simulates a job: ramps op_index, updates
+    position, eventually marks complete (or aborted/failed)."""
+    global ABORT_REQUESTED
+
+    if kind == "home":
+        time.sleep(0.4)
+        _set_motion(position_mm=[0.0, 0.0], homed=True, status="complete")
+        return
+
+    if kind == "calibrate":
+        time.sleep(1.0)
+        result = {
+            "travel_x_steps": int(WORK_AREA_X_MM * STEPS_PER_MM),
+            "travel_y_steps": int(WORK_AREA_Y_MM * STEPS_PER_MM),
+            "travel_x_mm": WORK_AREA_X_MM,
+            "travel_y_mm": WORK_AREA_Y_MM,
+            "steps_per_mm": STEPS_PER_MM,
+        }
+        _set_motion(status="complete", result=result, position_mm=[0.0, 0.0], homed=True)
+        return
+
+    if kind == "jog":
+        snap = _snapshot()
+        x, y = snap["position_mm"]
+        x += payload.get("dx", 0)
+        y += payload.get("dy", 0)
+        time.sleep(0.3)
+        _set_motion(position_mm=[x, y], status="complete")
+        return
+
+    if kind == "move":
+        time.sleep(0.4)
+        _set_motion(position_mm=[payload.get("x", 0), payload.get("y", 0)], status="complete")
+        return
+
+    if kind == "render":
+        operations = payload.get("operations", [])
+        total = len(operations)
+        # Walk through each op, sleeping per-op to simulate motion time.
+        for i, op in enumerate(operations):
+            if ABORT_REQUESTED:
+                _set_motion(status="aborted")
+                ABORT_REQUESTED = False
+                return
+            # Update position to last point of this op
+            pts = op.get("points") or []
+            if op.get("type") == "punch":
+                pt = op.get("point")
+                if pt is not None:
+                    pts = [pt]
+            new_pos = MOTION["position_mm"]
+            if pts:
+                last = pts[-1]
+                new_pos = [float(last[0]), float(last[1])]
+            _set_motion(
+                op_index=i,
+                position_mm=new_pos,
+                progress_pct=round(100.0 * i / total, 1) if total else 0.0,
+            )
+            time.sleep(0.05)  # 50ms per op — visible but not slow
+        _set_motion(op_index=total, progress_pct=100.0, status="complete")
+        return
+
+    _set_motion(status="failed", error="unknown kind: " + str(kind))
+
+
+def _queue_job(kind, payload):
+    global ABORT_REQUESTED
+    with MOTION_LOCK:
+        if MOTION["status"] == "running":
+            return None, "robot is busy"
+        ABORT_REQUESTED = False
+        job_id = "{}-{}".format(kind, uuid.uuid4().hex[:6])
+        MOTION.update({
+            "status": "running",
+            "kind": kind,
+            "job_id": job_id,
+            "op_index": 0,
+            "total_ops": len(payload.get("operations", [])) if kind == "render" else 0,
+            "progress_pct": 0.0,
+            "error": None,
+            "result": None,
+        })
+    threading.Thread(target=_run_fake_job, args=(kind, payload), daemon=True).start()
+    return job_id, None
 
 
 class MockRobotHandler(BaseHTTPRequestHandler):
@@ -26,34 +155,38 @@ class MockRobotHandler(BaseHTTPRequestHandler):
         return {}
 
     def do_GET(self):
-        if self.path == "/hello":
+        path = self.path.split("?")[0]
+
+        if path == "/hello":
             self._send_json({
                 "device_name": DEVICE_NAME,
                 "device_id": DEVICE_ID,
-                "firmware": "mock-1.0",
+                "ip_address": "127.0.0.1",
+                "listen_port": LISTEN_PORT,
+                "paired": bool(PAIRED_CLIENTS),
+                "work_area_mm": [WORK_AREA_X_MM, WORK_AREA_Y_MM],
+                "steps_per_mm": STEPS_PER_MM,
             })
-        elif self.path == "/status":
+        elif path == "/status":
             self._send_json({
                 "device_name": DEVICE_NAME,
                 "device_id": DEVICE_ID,
-                "status": "idle",
-                "paired_clients": len(PAIRED_CLIENTS),
+                "paired_client": next(iter(PAIRED_CLIENTS.values()), None),
+                "motion": _snapshot(),
+                "work_area_mm": [WORK_AREA_X_MM, WORK_AREA_Y_MM],
             })
-        elif self.path.startswith("/job"):
-            job_id = self.path.split("?id=")[-1] if "?id=" in self.path else None
-            if job_id and job_id in JOBS:
-                self._send_json(JOBS[job_id])
-            else:
-                self._send_json({"error": "Job not found"}, 404)
+        elif path == "/job":
+            self._send_json(_snapshot())
         else:
             self._send_json({"error": "Not found"}, 404)
 
     def do_POST(self):
-        if self.path == "/pair":
-            body = self._read_body()
+        global ABORT_REQUESTED
+        path = self.path.split("?")[0]
+        body = self._read_body()
+
+        if path == "/pair":
             client_name = body.get("client_name", "unknown")
-            pairing_code = body.get("pairing_code", "")
-            # Accept any pairing code for mock
             token = str(uuid.uuid4())
             PAIRED_CLIENTS[token] = client_name
             self._send_json({
@@ -61,23 +194,49 @@ class MockRobotHandler(BaseHTTPRequestHandler):
                 "device_id": DEVICE_ID,
                 "pair_token": token,
             })
-        elif self.path == "/unpair":
-            body = self._read_body()
-            token = body.get("token", "")
-            PAIRED_CLIENTS.pop(token, None)
-            self._send_json({"status": "unpaired"})
-        elif self.path == "/render":
-            body = self._read_body()
-            job_id = str(uuid.uuid4())[:8]
+        elif path == "/unpair":
+            PAIRED_CLIENTS.clear()
+            self._send_json({"ok": True})
+        elif path == "/home":
+            job_id, err = _queue_job("home", {})
+            if err:
+                self._send_json({"error": err}, 409)
+            else:
+                self._send_json({"accepted": True, "job_id": job_id, "kind": "home"}, 202)
+        elif path == "/calibrate":
+            job_id, err = _queue_job("calibrate", {})
+            if err:
+                self._send_json({"error": err}, 409)
+            else:
+                self._send_json({"accepted": True, "job_id": job_id, "kind": "calibrate"}, 202)
+        elif path == "/jog":
+            job_id, err = _queue_job("jog", body)
+            if err:
+                self._send_json({"error": err}, 409)
+            else:
+                self._send_json({"accepted": True, "job_id": job_id, "kind": "jog"}, 202)
+        elif path == "/move":
+            job_id, err = _queue_job("move", body)
+            if err:
+                self._send_json({"error": err}, 409)
+            else:
+                self._send_json({"accepted": True, "job_id": job_id, "kind": "move"}, 202)
+        elif path == "/render":
             operations = body.get("operations", [])
-            JOBS[job_id] = {
-                "job_id": job_id,
-                "status": "accepted",
-                "mode": body.get("mode", "write"),
-                "operation_count": len(operations),
-            }
-            print(f"[MOCK] Accepted job {job_id}: {len(operations)} operations")
-            self._send_json({"job_id": job_id, "status": "accepted"})
+            job_id, err = _queue_job("render", {"operations": operations})
+            if err:
+                self._send_json({"error": err}, 409)
+            else:
+                print(f"[MOCK] Accepted render job {job_id}: {len(operations)} operations")
+                self._send_json({
+                    "accepted": True,
+                    "job_id": job_id,
+                    "kind": "render",
+                    "operation_count": len(operations),
+                }, 202)
+        elif path == "/job/abort":
+            ABORT_REQUESTED = True
+            self._send_json({"aborted": True})
         else:
             self._send_json({"error": "Not found"}, 404)
 
@@ -86,9 +245,8 @@ class MockRobotHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    port = 8080
-    server = HTTPServer(("0.0.0.0", port), MockRobotHandler)
-    print(f"[MOCK] Robot server running on port {port}")
+    server = HTTPServer(("0.0.0.0", LISTEN_PORT), MockRobotHandler)
+    print(f"[MOCK] Robot server running on port {LISTEN_PORT}")
     server.serve_forever()
 
 

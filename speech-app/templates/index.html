@@ -84,6 +84,13 @@
           <button id="sendTranscriptButton" disabled>Send Transcript to Robot</button>
         </div>
 
+        <div class="controls robot-motion-controls">
+          <button id="homeRobotButton" disabled title="Drive the carriage to the top-left home corner">Home</button>
+          <button id="calibrateRobotButton" disabled title="Run a full travel sweep and report measured dimensions">Calibrate</button>
+          <button id="abortRobotButton" disabled title="Stop the current job at the next yield">Abort Job</button>
+          <span id="robotJobIndicator" class="robot-job-indicator" hidden></span>
+        </div>
+
         <p id="robotStatus" class="robot-status">
           Pair the speech app to your Pico 2 W over the current local network.
         </p>
@@ -169,7 +176,8 @@
         </div>
         <div class="modal-footer">
           <div id="previewStats" class="preview-stats"></div>
-          <button type="button" id="previewSendButton" disabled>Send to Robot (Phase 2)</button>
+          <div id="previewJobStatus" class="preview-job-status" hidden></div>
+          <button type="button" id="previewSendButton" disabled>Send to Robot</button>
         </div>
       </div>
     </div>

@@ -116,6 +116,9 @@ check_prereqs() {
   command -v mpremote >/dev/null 2>&1 || fail "mpremote is not installed in this environment."
   [ -f "$SOURCE_DIR/main.py" ] || fail "Missing $SOURCE_DIR/main.py"
   [ -f "$SOURCE_DIR/boot.py" ] || fail "Missing $SOURCE_DIR/boot.py"
+  [ -f "$SOURCE_DIR/pins.py" ] || fail "Missing $SOURCE_DIR/pins.py"
+  [ -f "$SOURCE_DIR/motion.py" ] || fail "Missing $SOURCE_DIR/motion.py"
+  [ -f "$SOURCE_DIR/pen.py" ] || fail "Missing $SOURCE_DIR/pen.py"
   [ -f "$SOURCE_DIR/secrets.py" ] || fail "Create robot/micropython/secrets.py from secrets.example.py first."
 }
 
@@ -140,6 +143,15 @@ main() {
 
   run_step "Copying boot.py to the Pico" \
     mpremote connect "$port" resume fs cp "$SOURCE_DIR/boot.py" :boot.py
+
+  run_step "Copying pins.py to the Pico" \
+    mpremote connect "$port" resume fs cp "$SOURCE_DIR/pins.py" :pins.py
+
+  run_step "Copying pen.py to the Pico" \
+    mpremote connect "$port" resume fs cp "$SOURCE_DIR/pen.py" :pen.py
+
+  run_step "Copying motion.py to the Pico" \
+    mpremote connect "$port" resume fs cp "$SOURCE_DIR/motion.py" :motion.py
 
   run_step "Copying main.py to the Pico" \
     mpremote connect "$port" resume fs cp "$SOURCE_DIR/main.py" :main.py

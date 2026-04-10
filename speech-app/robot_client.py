@@ -20,6 +20,9 @@ except ImportError:
 
 DEFAULT_PORT = 8080
 REQUEST_TIMEOUT_SECONDS = 4
+# Status polls and quick commands use the default timeout above. Render jobs
+# return immediately with a job_id (the firmware queues + executes async),
+# so they also don't need a long timeout.
 SERIAL_TIMEOUT_SECONDS = 2
 DISCOVERY_PORT = 9090
 DISCOVERY_MAGIC = "AE1_DISCOVERY_V1"
@@ -258,29 +261,54 @@ def unpair_robot(config: dict) -> dict:
     return _transport_request(config, "POST", "/unpair")
 
 
-def send_render_job(config: dict, text: str, font_family: str, script: str) -> dict:
+def send_paths_job(config: dict, operations: list, mode: str = "write") -> dict:
+    """Send a pre-generated toolpath (list of {type, points|point} ops in mm)
+    to the robot. The robot queues it, runs it asynchronously, and the caller
+    polls fetch_job_status() for progress."""
     return _transport_request(config, "POST", "/render", json_body={
-        "mode": "write",
-        "text": text,
-        "font_family": font_family,
-        "script": script,
+        "mode": mode,
+        "operations": operations,
         "submitted_at": datetime.now(timezone.utc).isoformat(),
     })
 
 
-def send_braille_job(
-    config: dict,
-    cells: list[list[int]],
-    language: str,
-    grade: int,
-) -> dict:
-    return _transport_request(config, "POST", "/render", json_body={
-        "mode": "braille",
-        "cells": cells,
-        "language": language,
-        "grade": grade,
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
+def send_home_command(config: dict) -> dict:
+    """Queue a homing job. Returns immediately with {job_id}."""
+    return _transport_request(config, "POST", "/home")
+
+
+def send_calibrate_command(config: dict) -> dict:
+    """Queue a full calibration sweep. Returns immediately with {job_id}.
+    Final results are available via fetch_job_status() once status==complete
+    (look for the 'result' key)."""
+    return _transport_request(config, "POST", "/calibrate")
+
+
+def send_jog_command(config: dict, dx_mm: float, dy_mm: float) -> dict:
+    """Queue a relative jog by (dx, dy) mm."""
+    return _transport_request(config, "POST", "/jog", json_body={
+        "dx": dx_mm,
+        "dy": dy_mm,
     })
+
+
+def send_move_command(config: dict, x_mm: float, y_mm: float) -> dict:
+    """Queue an absolute move to (x, y) mm in machine coordinates."""
+    return _transport_request(config, "POST", "/move", json_body={
+        "x": x_mm,
+        "y": y_mm,
+    })
+
+
+def send_abort_command(config: dict) -> dict:
+    """Request the running job to abort at the next yield point."""
+    return _transport_request(config, "POST", "/job/abort")
+
+
+def fetch_job_status(config: dict) -> dict:
+    """Poll current job/motion status. Cheap call (~50ms even mid-job).
+    Returns the motion controller's full state dict."""
+    return _transport_request(config, "GET", "/job")
 
 
 def interface_ipv4_configs() -> list[dict[str, str]]:

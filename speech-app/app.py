@@ -8,7 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
-from braille_translator import available_grades, normalize_grade, translate_to_braille, translate_to_braille_text
+from braille_translator import available_grades, normalize_grade, translate_to_braille_text
 from font_selector import choose_font
 from google_fonts import DEFAULT_FONT_FAMILY, get_fonts_for_subset, warm_cache
 from paper_sizes import (
@@ -23,7 +23,19 @@ from paper_sizes import (
 )
 from font_renderer import list_hershey_fonts
 from toolpath import generate_braille_toolpath, generate_write_toolpath
-from robot_client import DEFAULT_PORT, TRANSPORT_SERIAL, RobotClientError, close_transport, send_braille_job, send_render_job
+from robot_client import (
+    DEFAULT_PORT,
+    TRANSPORT_SERIAL,
+    RobotClientError,
+    close_transport,
+    fetch_job_status,
+    send_abort_command,
+    send_calibrate_command,
+    send_home_command,
+    send_jog_command,
+    send_move_command,
+    send_paths_job,
+)
 from robot_service import (
     discover_available_robots,
     get_current_robot,
@@ -91,28 +103,6 @@ def parse_pairing_request(payload: dict) -> tuple[str, int, str, str]:
         raise ValueError("Pairing code is required.")
 
     return host, port, pairing_code, client_name
-
-
-def parse_render_request(payload: dict) -> tuple[str, str, str]:
-    text = str(payload.get("text", "")).strip()
-    font_family = str(payload.get("font_family", "")).strip() or DEFAULT_FONT_FAMILY
-    script = str(payload.get("script", "")).strip() or "latin"
-
-    if not text:
-        raise ValueError("Text is required before sending to the robot.")
-
-    return text, font_family, script
-
-
-def parse_braille_render_request(payload: dict) -> tuple[str, str, int]:
-    text = str(payload.get("text", "")).strip()
-    language = str(payload.get("language", "")).strip() or "en"
-    grade = normalize_grade(payload.get("grade"))
-
-    if not text:
-        raise ValueError("Text is required before sending to the robot.")
-
-    return text, language, grade
 
 
 def save_uploaded_audio(audio) -> Path:
@@ -280,6 +270,54 @@ def robot_unpair():
     return jsonify(unpaired_robot_payload(remote_error))
 
 
+def _build_toolpath_from_request(payload: dict) -> dict:
+    """Run the speech-app toolpath pipeline against a /robot/render payload
+    and return the operations + metadata. Mirrors /toolpath/preview's input
+    format so the UI can use the same params for both preview and send."""
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        raise ValueError("Text is required.")
+
+    mode = str(payload.get("mode", "write")).strip()
+
+    paper_name = str(payload.get("paper_size", "A4")).strip()
+    paper = get_paper_size(paper_name)
+    if not paper:
+        custom_w = payload.get("paper_width")
+        custom_h = payload.get("paper_height")
+        if custom_w and custom_h:
+            try:
+                paper = (float(custom_w), float(custom_h))
+            except (TypeError, ValueError):
+                raise ValueError("Invalid custom paper dimensions.")
+        else:
+            paper = get_paper_size("A4")
+
+    margins = payload.get("margins", DEFAULT_MARGINS)
+    paper_offset = payload.get("paper_offset", PAPER_OFFSET)
+
+    if mode == "braille":
+        language = str(payload.get("language", "en")).strip() or "en"
+        grade = normalize_grade(payload.get("grade", 1))
+        return generate_braille_toolpath(
+            text, language=language, grade=grade,
+            paper_size=paper, margins=margins, paper_offset=paper_offset,
+        )
+
+    font_family = str(payload.get("font_family", "")).strip() or DEFAULT_FONT_FAMILY
+    font_size_mm = float(payload.get("font_size_mm", DEFAULT_FONT_SIZE_MM))
+    pen_tip_mm = float(payload.get("pen_tip_mm", DEFAULT_PEN_TIP_MM))
+    render_mode = str(payload.get("render_mode", "outline")).strip()
+    if render_mode not in ("outline", "filled", "centerline"):
+        render_mode = "outline"
+
+    return generate_write_toolpath(
+        text, font_family, font_size_mm=font_size_mm,
+        paper_size=paper, margins=margins, pen_tip_mm=pen_tip_mm,
+        render_mode=render_mode, paper_offset=paper_offset,
+    )
+
+
 @app.post("/robot/render")
 def robot_render():
     config = get_current_robot(app)
@@ -287,71 +325,152 @@ def robot_render():
         return jsonify({"error": "No robot is paired."}), 400
 
     payload = request_payload()
-    mode = str(payload.get("mode", "write")).strip()
 
-    if mode == "braille":
+    # Two payload shapes accepted:
+    #  1. {"operations": [...]} — preview modal sends what the user is
+    #     looking at directly. WYSIWYG.
+    #  2. {"text": ..., "font_family": ..., ...} — server runs the toolpath
+    #     pipeline from the params. Used by the legacy "Send Transcript"
+    #     button in the main controls.
+    operations = payload.get("operations")
+    mode = str(payload.get("mode", "write")).strip() or "write"
+
+    if operations is None:
         try:
-            text, language, grade = parse_braille_render_request(payload)
+            toolpath = _build_toolpath_from_request(payload)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            app.logger.exception("robot_render toolpath generation failed: %s", exc)
+            return jsonify({"error": f"Toolpath generation failed: {exc}"}), 500
+        operations = toolpath.get("operations", [])
+        mode = toolpath.get("mode", mode)
 
-        app.logger.info(
-            "robot_render braille requested device=%s host=%s port=%s chars=%s language=%s grade=%s",
-            config["device_name"], config["host"], config["port"],
-            len(text), language, grade,
-        )
-
-        cells = translate_to_braille(text, language, grade)
-
-        try:
-            result = send_braille_job(config, cells=cells, language=language, grade=grade)
-        except RobotClientError as exc:
-            app.logger.warning(
-                "robot_render braille failed device=%s host=%s port=%s error=%s",
-                config["device_name"], config["host"], config["port"], exc,
-            )
-            return jsonify({"error": str(exc)}), 502
-
-        app.logger.info(
-            "robot_render braille accepted device=%s host=%s port=%s job_id=%s cells=%s",
-            config["device_name"], config["host"], config["port"],
-            result.get("job_id"), len(cells),
-        )
-        return jsonify(result)
-
-    try:
-        text, font_family, script = parse_render_request(payload)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    if not isinstance(operations, list) or len(operations) == 0:
+        return jsonify({"error": "No operations to send."}), 400
 
     app.logger.info(
-        "robot_render requested device=%s host=%s port=%s chars=%s font=%s script=%s",
-        config["device_name"],
-        config["host"],
-        config["port"],
-        len(text),
-        font_family,
-        script,
+        "robot_render device=%s host=%s port=%s ops=%s mode=%s",
+        config["device_name"], config["host"], config["port"], len(operations), mode,
     )
+
     try:
-        result = send_render_job(config, text=text, font_family=font_family, script=script)
+        result = send_paths_job(config, operations=operations, mode=mode)
     except RobotClientError as exc:
         app.logger.warning(
             "robot_render failed device=%s host=%s port=%s error=%s",
-            config["device_name"],
-            config["host"],
-            config["port"],
-            exc,
+            config["device_name"], config["host"], config["port"], exc,
         )
         return jsonify({"error": str(exc)}), 502
 
     app.logger.info(
         "robot_render accepted device=%s host=%s port=%s job_id=%s",
-        config["device_name"],
-        config["host"],
-        config["port"],
-        result.get("job_id"),
+        config["device_name"], config["host"], config["port"], result.get("job_id"),
     )
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Direct motion control endpoints — Home / Calibrate / Jog / Move / Abort / Job
+# All return immediately; the robot queues and runs each action asynchronously.
+# Poll /robot/job for live status.
+# ---------------------------------------------------------------------------
+
+def _require_paired_robot():
+    config = get_current_robot(app)
+    if not config:
+        return None, (jsonify({"error": "No robot is paired."}), 400)
+    return config, None
+
+
+@app.post("/robot/home")
+def robot_home():
+    config, err = _require_paired_robot()
+    if err:
+        return err
+    try:
+        result = send_home_command(config)
+    except RobotClientError as exc:
+        app.logger.warning("robot_home failed: %s", exc)
+        return jsonify({"error": str(exc)}), 502
+    app.logger.info("robot_home accepted job_id=%s", result.get("job_id"))
+    return jsonify(result)
+
+
+@app.post("/robot/calibrate")
+def robot_calibrate():
+    config, err = _require_paired_robot()
+    if err:
+        return err
+    try:
+        result = send_calibrate_command(config)
+    except RobotClientError as exc:
+        app.logger.warning("robot_calibrate failed: %s", exc)
+        return jsonify({"error": str(exc)}), 502
+    app.logger.info("robot_calibrate accepted job_id=%s", result.get("job_id"))
+    return jsonify(result)
+
+
+@app.post("/robot/jog")
+def robot_jog():
+    config, err = _require_paired_robot()
+    if err:
+        return err
+    payload = request_payload()
+    try:
+        dx = float(payload.get("dx", 0))
+        dy = float(payload.get("dy", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "dx and dy must be numbers."}), 400
+    try:
+        result = send_jog_command(config, dx, dy)
+    except RobotClientError as exc:
+        app.logger.warning("robot_jog failed: %s", exc)
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(result)
+
+
+@app.post("/robot/move")
+def robot_move():
+    config, err = _require_paired_robot()
+    if err:
+        return err
+    payload = request_payload()
+    try:
+        x = float(payload.get("x"))
+        y = float(payload.get("y"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "x and y must be numbers."}), 400
+    try:
+        result = send_move_command(config, x, y)
+    except RobotClientError as exc:
+        app.logger.warning("robot_move failed: %s", exc)
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(result)
+
+
+@app.post("/robot/abort")
+def robot_abort():
+    config, err = _require_paired_robot()
+    if err:
+        return err
+    try:
+        result = send_abort_command(config)
+    except RobotClientError as exc:
+        app.logger.warning("robot_abort failed: %s", exc)
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(result)
+
+
+@app.get("/robot/job")
+def robot_job():
+    config, err = _require_paired_robot()
+    if err:
+        return err
+    try:
+        result = fetch_job_status(config)
+    except RobotClientError as exc:
+        return jsonify({"error": str(exc)}), 502
     return jsonify(result)
 
 

@@ -17,6 +17,13 @@ try:
 except Exception:
     cdc_data = None
 
+import pins
+import motion as motion_module
+from motion import (
+    Motion, MotionError,
+    STATUS_IDLE, STATUS_RUNNING, STATUS_COMPLETE, STATUS_FAILED, STATUS_ABORTED,
+)
+
 
 STATE_PATH = "pairing_state.json"
 LAST_RENDER_PATH = "last_render.json"
@@ -24,8 +31,15 @@ BUFFER_SIZE = 4096
 SERIAL_BUF_MAX = 4096
 DISCOVERY_MAGIC = b"AE1_DISCOVERY_V1"
 CLIENT_TIMEOUT_SECONDS = 3
+MAX_OPERATIONS = 5000
+MAX_POINTS_PER_OP = 2000
 
 _state_cache = None
+
+# Global motion controller and pending-job inbox.
+# Both populated inside serve(); referenced by dispatch_request().
+_motion = None
+_pending_job = None
 
 
 def log(message):
@@ -70,6 +84,9 @@ def device_id():
 def make_token():
     return "{:08x}{:08x}".format(urandom.getrandbits(32), urandom.getrandbits(32))
 
+
+def make_job_id(prefix):
+    return "{}-{}-{:04x}".format(prefix, int(time.time()), urandom.getrandbits(16))
 
 
 def send_all(client, payload):
@@ -154,7 +171,26 @@ def parse_request(client):
         except ValueError:
             payload = {}
 
-    return method, path, headers, payload
+    # Strip query string from the path so handlers can match exact paths.
+    raw_path = path
+    qs = ""
+    if "?" in path:
+        path, _, qs = path.partition("?")
+
+    return method, path, qs, raw_path, headers, payload
+
+
+def parse_query(qs):
+    params = {}
+    if not qs:
+        return params
+    for chunk in qs.split("&"):
+        if "=" in chunk:
+            k, _, v = chunk.partition("=")
+            params[k] = v
+        else:
+            params[chunk] = ""
+    return params
 
 
 def require_token(headers, state):
@@ -162,26 +198,98 @@ def require_token(headers, state):
 
 
 def hello_payload(ip_address, state):
-    return {
+    payload = {
         "device_name": secrets.DEVICE_NAME,
         "device_id": device_id(),
         "ip_address": ip_address,
         "listen_port": secrets.LISTEN_PORT,
         "paired": bool(state.get("pair_token")),
     }
+    if _motion is not None:
+        payload["work_area_mm"] = [pins.WORK_AREA_X_MM, pins.WORK_AREA_Y_MM]
+        payload["steps_per_mm"] = pins.STEPS_PER_MM
+    return payload
 
 
-def dispatch_request(method, path, headers, payload, ip_address, skip_auth=False):
+# ---------------------------------------------------------------------------
+# Job queueing helpers
+# ---------------------------------------------------------------------------
+
+def _set_pending_job(action, payload, kind):
+    """Reserve the motion controller for a new action. Returns (job_id, error_message).
+    error_message is non-None on rejection (busy, validation failed, etc)."""
+    global _pending_job
+    if _motion is None:
+        return None, "motion controller unavailable"
+    status = _motion.get_status()["status"]
+    if status == STATUS_RUNNING or _pending_job is not None:
+        return None, "robot is busy"
+    if not _motion.homed and kind not in ("home", "calibrate"):
+        return None, "robot is not homed"
+
+    job_id = make_job_id(kind)
+    # Mark motion state as queued so /job polls between accept and execution
+    # see something coherent.
+    js = _motion._job_state
+    js["status"] = "queued"
+    js["kind"] = kind
+    js["job_id"] = job_id
+    js["op_index"] = 0
+    js["total_ops"] = 0
+    js["error"] = None
+    if "result" in js:
+        js["result"] = None
+
+    _pending_job = {"kind": kind, "job_id": job_id, "payload": payload}
+    return job_id, None
+
+
+def _validate_render_payload(payload):
+    """Validate operations from a /render payload. Returns (operations, error)."""
+    operations = payload.get("operations")
+    if not isinstance(operations, list):
+        return None, "operations must be a list"
+    if len(operations) == 0:
+        return None, "operations is empty"
+    if len(operations) > MAX_OPERATIONS:
+        return None, "too many operations: {} (max {})".format(
+            len(operations), MAX_OPERATIONS)
+
+    for i, op in enumerate(operations):
+        if not isinstance(op, dict):
+            return None, "operation {} is not an object".format(i)
+        op_type = op.get("type", "draw")
+        if op_type in ("draw", "travel"):
+            pts = op.get("points")
+            if not isinstance(pts, list) or len(pts) < 2:
+                return None, "operation {} ({}): needs at least 2 points".format(i, op_type)
+            if len(pts) > MAX_POINTS_PER_OP:
+                return None, "operation {}: too many points ({} > {})".format(
+                    i, len(pts), MAX_POINTS_PER_OP)
+        elif op_type == "punch":
+            pt = op.get("point")
+            if not isinstance(pt, list) or len(pt) < 2:
+                return None, "operation {} (punch): missing point".format(i)
+        else:
+            return None, "operation {}: unknown type {}".format(i, op_type)
+
+    return operations, None
+
+
+# ---------------------------------------------------------------------------
+# Request dispatch
+# ---------------------------------------------------------------------------
+
+def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=False):
     state = load_state()
     log("request method={} path={} skip_auth={}".format(method, path, skip_auth))
 
     if method == "GET" and path == "/hello":
-        log("hello request from client")
         return 200, hello_payload(ip_address, state)
 
     if method == "POST" and path == "/pair":
         if payload.get("pairing_code") != secrets.PAIRING_CODE:
-            log("pair rejected client_name={} reason=incorrect_code".format(payload.get("client_name", "")))
+            log("pair rejected reason=incorrect_code")
             return 403, {"error": "Incorrect pairing code."}
 
         state = {
@@ -190,12 +298,7 @@ def dispatch_request(method, path, headers, payload, ip_address, skip_auth=False
             "paired_at": time.time(),
         }
         save_state(state)
-        log(
-            "pair accepted client_name={} token={}...".format(
-                state["paired_client"],
-                state["pair_token"][:8],
-            )
-        )
+        log("pair accepted client={} token={}...".format(state["paired_client"], state["pair_token"][:8]))
         return 200, {
             "device_name": secrets.DEVICE_NAME,
             "device_id": device_id(),
@@ -204,67 +307,110 @@ def dispatch_request(method, path, headers, payload, ip_address, skip_auth=False
         }
 
     if not skip_auth and not require_token(headers, state):
-        log("auth rejected path={} reason=invalid_token".format(path))
         return 401, {"error": "Missing or invalid pair token."}
 
     if method == "GET" and path == "/status":
         last_render = load_json(LAST_RENDER_PATH, {})
-        log(
-            "status requested paired_client={} last_job={}".format(
-                state.get("paired_client"),
-                last_render.get("job_id"),
-            )
-        )
-        return 200, {
+        body = {
             "device_name": secrets.DEVICE_NAME,
             "device_id": device_id(),
             "paired_client": state.get("paired_client"),
             "last_render": last_render,
         }
+        if _motion is not None:
+            body["motion"] = _motion.get_status()
+            body["work_area_mm"] = [pins.WORK_AREA_X_MM, pins.WORK_AREA_Y_MM]
+        return 200, body
 
     if method == "POST" and path == "/unpair":
         save_state({})
         log("unpair completed")
         return 200, {"ok": True}
 
+    # ----- motion endpoints -----
+
+    if method == "GET" and path == "/job":
+        if _motion is None:
+            return 503, {"error": "motion not initialized"}
+        return 200, _motion.get_status()
+
+    if method == "POST" and path == "/job/abort":
+        if _motion is None:
+            return 503, {"error": "motion not initialized"}
+        _motion.request_abort()
+        log("abort requested")
+        return 200, {"aborted": True}
+
+    if method == "POST" and path == "/home":
+        job_id, err = _set_pending_job("home", {}, "home")
+        if err:
+            return 409, {"error": err}
+        log("home queued job_id={}".format(job_id))
+        return 202, {"accepted": True, "job_id": job_id, "kind": "home"}
+
+    if method == "POST" and path == "/calibrate":
+        job_id, err = _set_pending_job("calibrate", {}, "calibrate")
+        if err:
+            return 409, {"error": err}
+        log("calibrate queued job_id={}".format(job_id))
+        return 202, {"accepted": True, "job_id": job_id, "kind": "calibrate"}
+
+    if method == "POST" and path == "/jog":
+        # Relative jog by (dx, dy) in mm. Useful for positioning by hand from the UI.
+        try:
+            dx = float(payload.get("dx", 0))
+            dy = float(payload.get("dy", 0))
+        except (TypeError, ValueError):
+            return 400, {"error": "dx and dy must be numbers"}
+        job_id, err = _set_pending_job("jog", {"dx": dx, "dy": dy}, "jog")
+        if err:
+            return 409, {"error": err}
+        log("jog queued dx={} dy={} job_id={}".format(dx, dy, job_id))
+        return 202, {"accepted": True, "job_id": job_id, "kind": "jog"}
+
+    if method == "POST" and path == "/move":
+        # Absolute move to (x, y) in mm.
+        try:
+            x = float(payload.get("x"))
+            y = float(payload.get("y"))
+        except (TypeError, ValueError):
+            return 400, {"error": "x and y must be numbers"}
+        job_id, err = _set_pending_job("move", {"x": x, "y": y}, "move")
+        if err:
+            return 409, {"error": err}
+        log("move queued x={} y={} job_id={}".format(x, y, job_id))
+        return 202, {"accepted": True, "job_id": job_id, "kind": "move"}
+
     if method == "POST" and path == "/render":
-        job_id = "{}-{}".format(device_id()[:6], int(time.time()))
         mode = payload.get("mode", "write")
 
-        render_job = {
+        # New protocol: payload includes pre-generated operations from the
+        # speech-app's toolpath pipeline. Old protocol (raw text) is no longer
+        # supported by the firmware — speech-app must run the toolpath now.
+        if "operations" not in payload:
+            return 400, {"error": "Render requires 'operations' field. Update speech-app."}
+
+        operations, err = _validate_render_payload(payload)
+        if err:
+            return 400, {"error": err}
+
+        job_id, err = _set_pending_job("render", {
+            "operations": operations,
+            "mode": mode,
+        }, "render")
+        if err:
+            return 409, {"error": err}
+
+        save_json(LAST_RENDER_PATH, {
             "job_id": job_id,
             "mode": mode,
             "submitted_at": payload.get("submitted_at"),
             "received_at": time.time(),
-        }
-
-        if mode == "braille":
-            render_job["cells"] = payload.get("cells", [])
-            render_job["language"] = payload.get("language", "en")
-            render_job["grade"] = payload.get("grade", 1)
-            log(
-                "render accepted job_id={} mode=braille cells={} language={} grade={}".format(
-                    job_id,
-                    len(render_job["cells"]),
-                    render_job["language"],
-                    render_job["grade"],
-                )
-            )
-        else:
-            render_job["text"] = payload.get("text", "")
-            render_job["font_family"] = payload.get("font_family", "Noto Sans")
-            render_job["script"] = payload.get("script", "latin")
-            log(
-                "render accepted job_id={} mode=write chars={} font={} script={}".format(
-                    job_id,
-                    len(render_job["text"]),
-                    render_job["font_family"],
-                    render_job["script"],
-                )
-            )
-
-        save_json(LAST_RENDER_PATH, render_job)
-        return 200, {"accepted": True, "job_id": job_id}
+            "operation_count": len(operations),
+        })
+        log("render queued job_id={} ops={}".format(job_id, len(operations)))
+        return 202, {"accepted": True, "job_id": job_id, "kind": "render",
+                     "operation_count": len(operations)}
 
     log("request not found path={}".format(path))
     return 404, {"error": "Not found."}
@@ -272,16 +418,14 @@ def dispatch_request(method, path, headers, payload, ip_address, skip_auth=False
 
 def handle_request(client, ip_address):
     try:
-        request = parse_request(client)
+        method, path, qs, raw_path, headers, payload = parse_request(client)
     except ValueError as exc:
         log("request parse failed error={}".format(exc))
         error_response(client, 400, "Bad request: {}".format(exc))
         return
 
-    method, path, headers, payload = request
-
     try:
-        status_code, response_body = dispatch_request(method, path, headers, payload, ip_address)
+        status_code, response_body = dispatch_request(method, path, qs, headers, payload, ip_address)
     except Exception as exc:
         log("dispatch crashed error={}".format(exc))
         error_response(client, 500, "Robot server error: {}".format(exc))
@@ -305,13 +449,18 @@ def handle_serial_command(cdc, line, ip_address):
         return
 
     method = cmd.get("method", "GET").upper()
-    path = cmd.get("path", "/")
+    raw_path = cmd.get("path", "/")
     headers = cmd.get("headers", {})
     payload = cmd.get("body", {})
 
+    qs = ""
+    path = raw_path
+    if "?" in raw_path:
+        path, _, qs = raw_path.partition("?")
+
     try:
         status_code, response_body = dispatch_request(
-            method, path, headers, payload, ip_address, skip_auth=True
+            method, path, qs, headers, payload, ip_address, skip_auth=True
         )
     except Exception as exc:
         log("serial dispatch crashed error={}".format(exc))
@@ -359,7 +508,82 @@ def drain_serial(cdc, serial_buf, ip_address):
     return serial_buf
 
 
+# ---------------------------------------------------------------------------
+# Pending-job runner — called from the main loop between service_io passes.
+# Yield callback (service_io) handles new requests during execution.
+# ---------------------------------------------------------------------------
+
+def _run_pending_job():
+    """Pop _pending_job and execute it through _motion. Updates job_state.
+    Returns True if a job was run, False otherwise."""
+    global _pending_job
+    if _pending_job is None or _motion is None:
+        return False
+
+    job = _pending_job
+    _pending_job = None
+
+    kind = job["kind"]
+    job_id = job["job_id"]
+    payload = job["payload"]
+
+    js = _motion._job_state
+    js["status"] = STATUS_RUNNING
+    js["kind"] = kind
+    js["job_id"] = job_id
+
+    try:
+        if kind == "home":
+            _motion.home()
+            js["status"] = STATUS_COMPLETE
+            log("home complete job_id={}".format(job_id))
+
+        elif kind == "calibrate":
+            result = _motion.calibrate_sweep()
+            js["result"] = result
+            js["status"] = STATUS_COMPLETE
+            log("calibrate complete travel_x_mm={} travel_y_mm={}".format(
+                result["travel_x_mm"], result["travel_y_mm"]))
+
+        elif kind == "jog":
+            _motion.move_by_mm(payload["dx"], payload["dy"])
+            js["status"] = STATUS_COMPLETE
+            log("jog complete dx={} dy={}".format(payload["dx"], payload["dy"]))
+
+        elif kind == "move":
+            _motion.move_to_mm(payload["x"], payload["y"])
+            js["status"] = STATUS_COMPLETE
+            log("move complete x={} y={}".format(payload["x"], payload["y"]))
+
+        elif kind == "render":
+            _motion.execute_operations(payload["operations"], job_id=job_id)
+            # status set inside execute_operations
+            log("render complete job_id={}".format(job_id))
+
+        else:
+            js["status"] = STATUS_FAILED
+            js["error"] = "unknown job kind: {}".format(kind)
+
+    except MotionError as exc:
+        # execute_operations already sets status; for other actions we set it here.
+        if js["status"] == STATUS_RUNNING:
+            if _motion._abort_requested:
+                js["status"] = STATUS_ABORTED
+            else:
+                js["status"] = STATUS_FAILED
+                js["error"] = str(exc)
+        log("job failed kind={} error={}".format(kind, exc))
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
 def serve():
+    global _motion
+
     serial_buf = bytearray()
     ip_address = "0.0.0.0"
 
@@ -369,18 +593,15 @@ def serve():
     if not wlan.isconnected():
         wlan.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
 
-    # Set up serial immediately so USB responds while WiFi connects
     poller = uselect.poll()
 
     if cdc_data is not None:
         log("CDC data channel available")
 
-    # Wait for WiFi, but service serial commands while waiting
     log("Waiting for Wi-Fi (serial is active)...")
     for _ in range(60):
         if wlan.isconnected():
             break
-
         time.sleep(0.5)
         if cdc_data is not None:
             serial_buf = drain_serial(cdc_data, serial_buf, ip_address)
@@ -393,7 +614,6 @@ def serve():
 
     log("Pairing code: {}".format(secrets.PAIRING_CODE))
 
-    # Set up TCP/UDP servers (bind even without WiFi — they'll just get no traffic)
     tcp_address = socket.getaddrinfo("0.0.0.0", secrets.LISTEN_PORT)[0][-1]
     tcp_server = socket.socket()
     tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -411,24 +631,58 @@ def serve():
     poller.register(tcp_server, uselect.POLLIN)
     poller.register(udp_server, uselect.POLLIN)
 
-    while True:
-        for sock, _event in poller.poll(1000):
+    # service_io is the cooperative-yield callback. It's also called from
+    # the idle path in the main loop. poll_timeout=0 means non-blocking
+    # (used during motion); positive timeout (used when idle) blocks until
+    # a request arrives or the timeout elapses.
+    def service_io(poll_timeout_ms=0):
+        nonlocal serial_buf
+        try:
+            events = poller.poll(poll_timeout_ms)
+        except OSError:
+            events = []
+        for sock, _ev in events:
             if sock is tcp_server:
-                client, _addr = tcp_server.accept()
+                try:
+                    client, _addr = tcp_server.accept()
+                except OSError:
+                    continue
                 client.setblocking(True)
                 client.settimeout(CLIENT_TIMEOUT_SECONDS)
                 try:
                     handle_request(client, ip_address)
                 except Exception as exc:
                     log("request crashed error={}".format(exc))
-                    json_response(client, 500, {"error": "Robot server error: {}".format(exc)})
+                    try:
+                        json_response(client, 500, {"error": "Robot server error: {}".format(exc)})
+                    except Exception:
+                        pass
                 finally:
-                    client.close()
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
             elif sock is udp_server:
                 handle_discovery(udp_server, ip_address)
-        # Always drain CDC after poll — poll never fires POLLIN for CDCInterface
         if cdc_data is not None:
             serial_buf = drain_serial(cdc_data, serial_buf, ip_address)
+
+    # Build the motion controller now that service_io exists. The yield
+    # callback uses non-blocking polling so it never blocks the motors for
+    # more than a few ms per call.
+    _motion = Motion(on_yield=lambda: service_io(0))
+    log("motion controller ready: work_area={}x{}mm steps_per_mm={}".format(
+        round(pins.WORK_AREA_X_MM, 1), round(pins.WORK_AREA_Y_MM, 1), pins.STEPS_PER_MM))
+
+    while True:
+        if _pending_job is not None:
+            # Run queued action. The motion code yields to service_io
+            # periodically during execution, so new requests get handled.
+            _run_pending_job()
+        else:
+            # Idle: block in poll for up to 1 sec to save CPU and let WiFi
+            # background tasks breathe.
+            service_io(1000)
 
 
 serve()

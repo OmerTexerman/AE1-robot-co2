@@ -48,6 +48,13 @@ const previewPlayPause = document.getElementById("previewPlayPause");
 const previewRestart = document.getElementById("previewRestart");
 const previewSkip = document.getElementById("previewSkip");
 const previewSpeed = document.getElementById("previewSpeed");
+const previewSendButton = document.getElementById("previewSendButton");
+const previewJobStatus = document.getElementById("previewJobStatus");
+
+const homeRobotButton = document.getElementById("homeRobotButton");
+const calibrateRobotButton = document.getElementById("calibrateRobotButton");
+const abortRobotButton = document.getElementById("abortRobotButton");
+const robotJobIndicator = document.getElementById("robotJobIndicator");
 
 const DEFAULT_TRANSCRIPT_TEXT = "Your text will appear here.";
 const HISTORY_STORAGE_KEY = "speechAppTranscriptHistory";
@@ -94,6 +101,14 @@ let activeFontPicker = null; // { triggerEl, subset, currentFamily, onSelect }
 let robotPollTimer = null;
 let robotStateRequestInFlight = false;
 let robotStateMutationVersion = 0;
+
+// Job-status polling — separate from the periodic /robot status poll above.
+// Driven by Home/Calibrate/Send actions and runs at ~2 Hz until the robot
+// reaches a terminal status (complete/failed/aborted/idle).
+let robotJobPollTimer = null;
+let robotJobInFlight = false;
+let robotJobInPreviewMode = false;   // true while live-tracking on the preview canvas
+let lastRobotJobStatus = null;
 
 function escapeHtml(s) {
   const d = document.createElement("div");
@@ -518,12 +533,22 @@ function syncRobotControls() {
   const canRefresh = !robotBusy;
   const canUnpair = !robotBusy && Boolean(pairedRobot);
   const canSendTranscript = !robotBusy && Boolean(pairedRobot) && robotConnected && currentTranscriptId !== null;
+  const canControlMotion = Boolean(pairedRobot) && robotConnected && !robotJobInFlight;
 
   discoverRobotsButton.disabled = robotBusy;
   pairRobotButton.disabled = !canPair;
   refreshRobotButton.disabled = !canRefresh;
   unpairRobotButton.disabled = !canUnpair;
   sendTranscriptButton.disabled = !canSendTranscript;
+  homeRobotButton.disabled = !canControlMotion;
+  calibrateRobotButton.disabled = !canControlMotion;
+  // Abort is enabled only while a job is actively running — toggled in updateRobotJobUi.
+  if (!robotJobInFlight) abortRobotButton.disabled = true;
+  // Preview Send button is enabled only when there's a preview AND a connected robot AND no job running.
+  if (previewSendButton) {
+    const hasPreview = Boolean(currentPreviewData && currentPreviewData.operations && currentPreviewData.operations.length);
+    previewSendButton.disabled = !(hasPreview && Boolean(pairedRobot) && robotConnected && !robotJobInFlight);
+  }
   updateHistoryActionButtons();
 }
 
@@ -585,6 +610,13 @@ function renderRobotState(payload, options = {}) {
   `;
   syncRobotControls();
   scheduleRobotPoll();
+
+  // If the robot has a job in progress (e.g. page reload mid-draw), resume
+  // job-status polling so the indicator picks up where it left off.
+  const motionStatus = payload.status && payload.status.motion && payload.status.motion.status;
+  if ((motionStatus === "running" || motionStatus === "queued") && !robotJobInFlight) {
+    startJobPolling();
+  }
 }
 
 function renderDiscoveredRobots(items) {
@@ -807,6 +839,254 @@ async function sendTranscriptPayloadToRobot(transcriptToSend) {
 
 async function sendTranscriptToRobot() {
   await sendTranscriptPayloadToRobot(getCurrentTranscript());
+}
+
+// ---------------------------------------------------------------------------
+// Robot motion control: home / calibrate / abort + job-status polling
+// ---------------------------------------------------------------------------
+
+function stopJobPolling() {
+  if (robotJobPollTimer !== null) {
+    window.clearTimeout(robotJobPollTimer);
+    robotJobPollTimer = null;
+  }
+}
+
+function isTerminalStatus(status) {
+  return status === "complete" || status === "failed" || status === "aborted" || status === "idle" || !status;
+}
+
+async function pollRobotJob() {
+  let data;
+  try {
+    data = await fetchJson("/robot/job");
+  } catch (e) {
+    // Transient error — retry after a backoff. Don't tear down state.
+    robotJobPollTimer = window.setTimeout(pollRobotJob, 1500);
+    return;
+  }
+  lastRobotJobStatus = data;
+  updateRobotJobUi(data);
+
+  if (robotJobInPreviewMode && currentPreviewData) {
+    updatePreviewWithLiveRobot(data);
+  }
+
+  if (isTerminalStatus(data.status)) {
+    if (robotJobInPreviewMode) {
+      finishLivePreview(data);
+    }
+    onRobotJobTerminal(data);
+    robotJobInFlight = false;
+    robotJobInPreviewMode = false;
+    syncRobotControls();
+    return;
+  }
+
+  robotJobPollTimer = window.setTimeout(pollRobotJob, 500);
+}
+
+function startJobPolling({ inPreviewMode = false } = {}) {
+  stopJobPolling();
+  robotJobInFlight = true;
+  robotJobInPreviewMode = inPreviewMode;
+  syncRobotControls();
+  pollRobotJob();
+}
+
+function updateRobotJobUi(data) {
+  // Robot section indicator
+  if (!data || data.status === "idle" || !data.status) {
+    robotJobIndicator.hidden = true;
+    robotJobIndicator.textContent = "";
+  } else {
+    robotJobIndicator.hidden = false;
+    const kind = data.kind || "job";
+    if (data.status === "running" || data.status === "queued") {
+      const total = data.total_ops || 0;
+      if (total > 0) {
+        robotJobIndicator.textContent = `${kind}: ${data.op_index || 0}/${total} (${data.progress_pct || 0}%)`;
+      } else {
+        robotJobIndicator.textContent = `${kind}: ${data.status}`;
+      }
+    } else {
+      robotJobIndicator.textContent = `${kind}: ${data.status}`;
+    }
+  }
+
+  // Abort button: only meaningful while a motion job is actively running.
+  abortRobotButton.disabled = !(data && data.status === "running");
+
+  // Preview modal status line (if modal is open)
+  if (previewModal.style.display !== "none" && previewJobStatus) {
+    if (!data || data.status === "idle") {
+      previewJobStatus.hidden = true;
+    } else if (data.status === "queued") {
+      previewJobStatus.hidden = false;
+      previewJobStatus.textContent = "Queued on robot...";
+    } else if (data.status === "running") {
+      previewJobStatus.hidden = false;
+      const total = data.total_ops || 0;
+      const opIdx = data.op_index || 0;
+      previewJobStatus.textContent = total > 0
+        ? `Drawing: ${opIdx}/${total} ops (${data.progress_pct || 0}%)`
+        : `Drawing...`;
+    } else if (data.status === "complete") {
+      previewJobStatus.hidden = false;
+      previewJobStatus.textContent = "Done.";
+    } else if (data.status === "failed") {
+      previewJobStatus.hidden = false;
+      previewJobStatus.textContent = `Failed: ${data.error || "unknown error"}`;
+    } else if (data.status === "aborted") {
+      previewJobStatus.hidden = false;
+      previewJobStatus.textContent = "Aborted.";
+    }
+  }
+}
+
+function updatePreviewWithLiveRobot(data) {
+  if (!previewAnimationState || !currentPreviewData) return;
+  const opIdx = Math.max(0, Math.min(data.op_index || 0, currentPreviewData.operations.length));
+  // Mark all ops up to opIdx as completed.
+  previewAnimationState.completedOps = currentPreviewData.operations.slice(0, opIdx).map((op) => ({
+    type: op.type,
+    points: op.points,
+    point: op.point,
+  }));
+  previewAnimationState.currentSegIndex = opIdx;
+  previewAnimationState.currentSegProgress = 0;
+  if (Array.isArray(data.position_mm) && data.position_mm.length === 2) {
+    previewAnimationState.toolheadPos = data.position_mm;
+  }
+  drawFrame(previewCanvas.getContext("2d"), previewCanvas, previewAnimationState);
+}
+
+function finishLivePreview(data) {
+  if (!previewAnimationState || !currentPreviewData) return;
+  previewAnimationState.completedOps = (currentPreviewData.operations || []).map((op) => ({
+    type: op.type,
+    points: op.points,
+    point: op.point,
+  }));
+  previewAnimationState.currentSegIndex = (currentPreviewData.operations || []).length;
+  previewAnimationState.done = true;
+  if (Array.isArray(data.position_mm) && data.position_mm.length === 2) {
+    previewAnimationState.toolheadPos = data.position_mm;
+  }
+  drawFrame(previewCanvas.getContext("2d"), previewCanvas, previewAnimationState);
+}
+
+function onRobotJobTerminal(data) {
+  if (!data) return;
+  const kind = data.kind || "job";
+  if (data.kind === "calibrate" && data.result) {
+    const r = data.result;
+    const x = typeof r.travel_x_mm === "number" ? r.travel_x_mm.toFixed(1) : "?";
+    const y = typeof r.travel_y_mm === "number" ? r.travel_y_mm.toFixed(1) : "?";
+    robotStatus.textContent = `Calibration: travel X=${x}mm, Y=${y}mm, ${r.steps_per_mm} steps/mm`;
+  } else if (data.status === "complete") {
+    robotStatus.textContent = `${kind} complete.`;
+  } else if (data.status === "failed") {
+    robotStatus.textContent = `${kind} failed: ${data.error || "unknown error"}`;
+  } else if (data.status === "aborted") {
+    robotStatus.textContent = `${kind} aborted.`;
+  }
+}
+
+async function homeRobot() {
+  if (!pairedRobot || !robotConnected) {
+    robotStatus.textContent = "Pair with a reachable robot first.";
+    return;
+  }
+  try {
+    robotStatus.textContent = "Homing...";
+    const resp = await fetchJson("/robot/home", { method: "POST" });
+    robotJobIndicator.hidden = false;
+    robotJobIndicator.textContent = `home: queued (${resp.job_id || ""})`;
+    startJobPolling();
+  } catch (e) {
+    robotStatus.textContent = e.message || "Home failed.";
+  }
+}
+
+async function calibrateRobot() {
+  if (!pairedRobot || !robotConnected) {
+    robotStatus.textContent = "Pair with a reachable robot first.";
+    return;
+  }
+  try {
+    robotStatus.textContent = "Calibrating (full sweep)...";
+    const resp = await fetchJson("/robot/calibrate", { method: "POST" });
+    robotJobIndicator.hidden = false;
+    robotJobIndicator.textContent = `calibrate: queued (${resp.job_id || ""})`;
+    startJobPolling();
+  } catch (e) {
+    robotStatus.textContent = e.message || "Calibrate failed.";
+  }
+}
+
+async function abortRobotJob() {
+  try {
+    await fetchJson("/robot/abort", { method: "POST" });
+  } catch (e) {
+    robotStatus.textContent = e.message || "Abort failed.";
+  }
+}
+
+async function sendPreviewToRobot() {
+  if (!currentPreviewData || !currentPreviewData.operations || currentPreviewData.operations.length === 0) {
+    if (previewJobStatus) {
+      previewJobStatus.hidden = false;
+      previewJobStatus.textContent = "No preview generated yet.";
+    }
+    return;
+  }
+  if (!pairedRobot || !robotConnected) {
+    if (previewJobStatus) {
+      previewJobStatus.hidden = false;
+      previewJobStatus.textContent = "Pair with a reachable robot first.";
+    }
+    return;
+  }
+
+  // Switch the canvas from auto-animation to live-tracking. Reset visible
+  // state so polling fills it in op-by-op as the robot actually draws.
+  stopPreviewAnimation();
+  if (previewAnimationState) {
+    previewAnimationState.completedOps = [];
+    previewAnimationState.currentSegIndex = 0;
+    previewAnimationState.currentSegProgress = 0;
+    previewAnimationState.toolheadPos = null;
+    previewAnimationState.done = false;
+    previewAnimationState.playing = false;
+    drawFrame(previewCanvas.getContext("2d"), previewCanvas, previewAnimationState);
+  }
+
+  try {
+    previewSendButton.disabled = true;
+    if (previewJobStatus) {
+      previewJobStatus.hidden = false;
+      previewJobStatus.textContent = "Submitting...";
+    }
+    const resp = await fetchJson("/robot/render", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: currentPreviewData.mode || "write",
+        operations: currentPreviewData.operations,
+      }),
+    });
+    if (previewJobStatus) {
+      previewJobStatus.textContent = `Queued on robot: ${resp.job_id || ""}`;
+    }
+    startJobPolling({ inPreviewMode: true });
+  } catch (e) {
+    if (previewJobStatus) {
+      previewJobStatus.hidden = false;
+      previewJobStatus.textContent = e.message || "Send failed.";
+    }
+    syncRobotControls();
+  }
 }
 
 function ext(mime) {
@@ -1191,6 +1471,8 @@ async function fetchPreview(item) {
     previewStats.textContent = err.message || "Preview failed.";
     currentPreviewData = null;
   }
+  // Re-evaluate Send button state once preview load resolves.
+  syncRobotControls();
 }
 
 function renderPreviewStats(data) {
@@ -1740,6 +2022,10 @@ discoverRobotsButton.addEventListener("click", discoverRobots);
 refreshRobotButton.addEventListener("click", loadRobotState);
 unpairRobotButton.addEventListener("click", unpairRobot);
 sendTranscriptButton.addEventListener("click", () => handleSendToRobot(getCurrentTranscript()));
+homeRobotButton.addEventListener("click", homeRobot);
+calibrateRobotButton.addEventListener("click", calibrateRobot);
+abortRobotButton.addEventListener("click", abortRobotJob);
+previewSendButton.addEventListener("click", sendPreviewToRobot);
 transcriptSizePicker.innerHTML = FONT_SIZES.map(
   (s) => `<option value="${s}"${s === DEFAULT_FONT_SIZE ? " selected" : ""}>${s}</option>`
 ).join("");
