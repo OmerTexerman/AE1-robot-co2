@@ -334,6 +334,30 @@ def send_abort_command(config: dict) -> dict:
     return _transport_request(config, "POST", "/job/abort")
 
 
+def send_pen_set(config: dict, duty: int) -> dict:
+    return _transport_request(config, "POST", "/pen/set", json_body={"duty": duty})
+
+
+def send_pen_save(
+    config: dict,
+    pen_up_duty: int | None = None,
+    pen_down_duty: int | None = None,
+    punch_duty: int | None = None,
+) -> dict:
+    body = {}
+    if pen_up_duty is not None:
+        body["pen_up_duty"] = pen_up_duty
+    if pen_down_duty is not None:
+        body["pen_down_duty"] = pen_down_duty
+    if punch_duty is not None:
+        body["punch_duty"] = punch_duty
+    return _transport_request(config, "POST", "/pen/save", json_body=body)
+
+
+def fetch_pen_config(config: dict) -> dict:
+    return _transport_request(config, "GET", "/pen/config")
+
+
 def fetch_job_status(config: dict) -> dict:
     """Fetch the current job or motion state."""
     return _transport_request(config, "GET", "/job")

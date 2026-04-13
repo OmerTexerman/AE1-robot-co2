@@ -10,6 +10,7 @@ from font_renderer import (
     get_hershey_metrics,
     get_ttf_path,
     hatch_fill,
+    is_connected_hershey_font,
     is_hershey_font,
 )
 from paper_sizes import DEFAULT_FONT_SIZE_MM, DEFAULT_MARGINS, DEFAULT_PEN_TIP_MM, PAPER_OFFSET
@@ -21,6 +22,7 @@ BRAILLE_DOT_SPACING = 2.5
 BRAILLE_CELL_WIDTH = 6.0
 BRAILLE_CELL_HEIGHT = 10.0
 BRAILLE_WORD_GAP = 12.0
+BRAILLE_PUNCH_FROM_BACK = True
 
 
 def _distance(p1, p2):
@@ -65,15 +67,24 @@ def _reorder_paths_nearest_neighbor(paths, start=(0, 0)):
 
 
 def _merge_nearby_endpoints(paths, tolerance):
-    """Merge consecutive paths whose endpoints are within tolerance."""
+    """Merge consecutive paths whose endpoints are within tolerance.
+
+    If the next path's end is closer than its start, reverse it before merging.
+    """
     if not paths:
         return []
     merged = [list(paths[0])]
     for i in range(1, len(paths)):
-        if _distance(merged[-1][-1], paths[i][0]) <= tolerance:
-            merged[-1].extend(paths[i][1:])
+        next_path = list(paths[i])
+        d_start = _distance(merged[-1][-1], next_path[0])
+        d_end = _distance(merged[-1][-1], next_path[-1])
+        if d_end < d_start:
+            next_path.reverse()
+            d_start = d_end
+        if d_start <= tolerance:
+            merged[-1].extend(next_path[1:])
         else:
-            merged.append(list(paths[i]))
+            merged.append(next_path)
     return merged
 
 
@@ -260,8 +271,15 @@ def generate_write_toolpath(
             cursor_y += line_height
 
     if optimize and all_paths:
-        all_paths = _reorder_paths_nearest_neighbor(all_paths)
-        all_paths = _merge_nearby_endpoints(all_paths, max(pen_tip_mm * 0.5, 0.1))
+        if use_hershey and is_connected_hershey_font(font_family):
+            # Script/cursive Hershey fonts depend on stroke order for their
+            # letter joins. Preserve authoring order and only fuse path
+            # endpoints that are already effectively continuous.
+            all_paths = _merge_nearby_endpoints(all_paths, max(pen_tip_mm * 1.25, 0.4))
+        else:
+            all_paths = _reorder_paths_nearest_neighbor(all_paths)
+            all_paths = _merge_nearby_endpoints(all_paths, max(pen_tip_mm * 1.25, 0.4))
+            all_paths = _reorder_paths_nearest_neighbor(all_paths)
 
     operations = []
     last_point = None
@@ -409,6 +427,9 @@ def generate_braille_toolpath(
                 cursor_x += BRAILLE_CELL_WIDTH
 
         cursor_y += BRAILLE_CELL_HEIGHT
+
+    if BRAILLE_PUNCH_FROM_BACK and all_dots:
+        all_dots = [(paper_w - x, y) for x, y in all_dots]
 
     if optimize and all_dots:
         all_dots = _reorder_points_nearest_neighbor(all_dots)

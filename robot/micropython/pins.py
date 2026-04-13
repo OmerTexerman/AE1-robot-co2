@@ -16,11 +16,21 @@ SW_X_MAX_PIN = 26   # right rail
 SW_Y_MIN_PIN = 28   # top rail    (bridge end-stop in the frame)
 SW_Y_MAX_PIN = 17   # bottom rail
 
-# Servo constants stay here even though the current Pen implementation is a stub.
-SERVO_PIN           = 13
+# Servo: Tower Pro SG90 positional servo on GPIO 1.
+# 50 Hz PWM, duty_u16 range for ~0.5–2.4 ms pulse width:
+#   ~1638 = 0° (0.5 ms)
+#   ~4915 = 90° (1.5 ms)
+#   ~7864 = 180° (2.4 ms)
+# Pen-up and pen-down angles depend on the mounting orientation and will be
+# calibrated empirically once the lift mechanism is in place.
+SERVO_PIN           = 1
 SERVO_FREQ_HZ       = 50
-SERVO_PEN_UP_DUTY   = 2000   # Placeholder; calibrate when the mechanism is mounted.
-SERVO_PEN_DOWN_DUTY = 8000   # Placeholder; calibrate when the mechanism is mounted.
+SERVO_MIN_DUTY      = 1600   # Keep calibration inside the normal SG90 range
+SERVO_MAX_DUTY      = 8000
+SERVO_PEN_UP_DUTY   = 8000   # Default pen-up
+SERVO_PEN_DOWN_DUTY = 6500   # Default writing depth
+SERVO_PUNCH_DUTY    = 4500   # Default braille punch depth
+SERVO_MOVE_SETTLE_MS = 100
 SERVO_PUNCH_HOLD_MS = 60
 
 # 200 full steps/rev * 8 microsteps / (20-tooth pulley * 2 mm pitch).
@@ -40,6 +50,10 @@ SOFT_LIMIT_MARGIN_MM = 2.0
 #   work_area = travel - HOME_BACKOFF_MM - SOFT_LIMIT_MARGIN_MM
 CALIBRATION_PATH = "calibration.json"
 
-# Half-periods in microseconds. 500 us yields a 1 kHz step rate (~25 mm/s).
+# Half-periods in microseconds. Larger numbers mean slower motion.
 DEFAULT_HALF_PERIOD_US = 500
-HOMING_HALF_PERIOD_US  = 500
+HOMING_HALF_PERIOD_US  = 900
+TRAVEL_HALF_PERIOD_US  = 900
+DRAW_HALF_PERIOD_US    = 1000
+PEN_DOWN_SETTLE_MS     = 60
+HOME_SWITCH_SETTLE_MS  = 40

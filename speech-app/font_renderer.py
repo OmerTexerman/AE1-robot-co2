@@ -561,9 +561,19 @@ HERSHEY_FONTS = {
     "Hershey Gothic Italian": "gothicita",
 }
 
+CONNECTED_HERSHEY_FONTS = {
+    "Hershey Script",
+    "Hershey Script Bold",
+    "Hershey Cursive",
+}
+
 
 def is_hershey_font(font_family):
     return font_family in HERSHEY_FONTS
+
+
+def is_connected_hershey_font(font_family):
+    return font_family in CONNECTED_HERSHEY_FONTS
 
 
 def list_hershey_fonts():
@@ -587,6 +597,35 @@ def get_hershey_glyphs(font_family, text, font_size_mm):
     render_height = 1000
     hf.normalize_rendering(render_height)
     scale = font_size_mm / render_height
+
+    if is_connected_hershey_font(font_family) and len(text) > 1:
+        strokes = list(hf.strokes_for_text(text))
+        all_points = [pt for stroke in strokes for pt in stroke]
+
+        if all_points:
+            min_x = min(p[0] for p in all_points)
+            max_x = max(p[0] for p in all_points)
+            text_width = (max_x - min_x) * scale
+            text_left = min_x * scale
+        else:
+            text_width = font_size_mm * 0.4
+            text_left = 0
+
+        paths = []
+        for stroke in strokes:
+            if len(stroke) >= 2:
+                path = [((x * scale) - text_left, -y * scale) for x, y in stroke]
+                paths.append(path)
+
+        return [
+            GlyphResult(
+                char=text,
+                paths=paths,
+                x_offset=0,
+                y_offset=0,
+                advance=text_width,
+            )
+        ]
 
     results = []
 

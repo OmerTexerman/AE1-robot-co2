@@ -55,6 +55,17 @@ const homeRobotButton = document.getElementById("homeRobotButton");
 const calibrateRobotButton = document.getElementById("calibrateRobotButton");
 const abortRobotButton = document.getElementById("abortRobotButton");
 const robotJobIndicator = document.getElementById("robotJobIndicator");
+const penCalibrationPanel = document.getElementById("penCalibrationPanel");
+const penServoSlider = document.getElementById("penServoSlider");
+const penServoValue = document.getElementById("penServoValue");
+const penSaveUpButton = document.getElementById("penSaveUpButton");
+const penSaveDownButton = document.getElementById("penSaveDownButton");
+const penSavePunchButton = document.getElementById("penSavePunchButton");
+const penUpValue = document.getElementById("penUpValue");
+const penDownValue = document.getElementById("penDownValue");
+const penPunchValue = document.getElementById("penPunchValue");
+const penCalibrationStatus = document.getElementById("penCalibrationStatus");
+const penCalibrationMessage = document.getElementById("penCalibrationMessage");
 
 const DEFAULT_TRANSCRIPT_TEXT = "Your text will appear here.";
 const HISTORY_STORAGE_KEY = "speechAppTranscriptHistory";
@@ -63,6 +74,8 @@ const FONT_SIZES = [14, 16, 18, 20, 24, 28, 32, 40];
 const DEFAULT_FONT_SIZE = 20;
 const DEFAULT_FONT_FAMILY = "Noto Sans";
 const DEFAULT_ROBOT_PORT = 8080;
+const DEFAULT_PEN_DUTY_MIN = 1600;
+const DEFAULT_PEN_DUTY_MAX = 8000;
 const TRANSPORT_SERIAL = "serial";
 
 let mediaRecorder;
@@ -108,6 +121,13 @@ function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+function setPenCalibrationMessage(message = "", isError = false) {
+  if (!penCalibrationMessage) return;
+  penCalibrationMessage.hidden = !message;
+  penCalibrationMessage.textContent = message;
+  penCalibrationMessage.style.color = isError ? "red" : "";
 }
 
 async function fetchBraillePreview(text, language, grade) {
@@ -238,6 +258,7 @@ function normalizeHistoryItem(item) {
   const fs = Number(item.font_size);
   const ag = Array.isArray(item.available_grades) ? item.available_grades : [];
   const bg = item.braille_grade;
+  const bt = typeof item.braille_text === "string" ? item.braille_text : "";
   return {
     id: typeof item.id === "string" && item.id ? item.id : historyItemId(),
     text,
@@ -251,6 +272,7 @@ function normalizeHistoryItem(item) {
     created_at: typeof item.created_at === "string" && item.created_at ? item.created_at : new Date().toISOString(),
     available_grades: ag,
     braille_grade: bg === "off" || bg === 1 || bg === 2 ? bg : "off",
+    braille_text: bt,
   };
 }
 
@@ -488,10 +510,14 @@ function renderHistory(items) {
   const disableSend = activeRobotAction !== null || !pairedRobot || !robotConnected;
   historyList.innerHTML = items
     .map(
-      (i) => `<div class="history-item" data-history-id="${escapeHtml(i.id)}">
+      (i) => {
+        const showBraille = i.braille_grade !== "off" && i.braille_text;
+        const displayText = showBraille ? i.braille_text : i.text;
+        const displayFont = showBraille ? "" : cssFontFamily(escapeHtml(i.font_family));
+        return `<div class="history-item" data-history-id="${escapeHtml(i.id)}">
         <div class="history-copy">
           <small>${escapeHtml(i.provider)} &middot; ${escapeHtml(i.language || i.script)} &middot; ${escapeHtml(new Date(i.created_at).toLocaleString())}</small>
-          <p style="font-family:${cssFontFamily(escapeHtml(i.font_family))};font-size:${i.font_size}px" data-history-text-id="${escapeHtml(i.id)}">${escapeHtml(i.text)}</p>
+          <p style="font-family:${displayFont};font-size:${i.font_size}px" data-history-text-id="${escapeHtml(i.id)}">${escapeHtml(displayText)}</p>
           <div class="history-style-controls">
             <select class="size-picker" data-history-id="${escapeHtml(i.id)}">
               ${FONT_SIZES.map((s) => `<option value="${s}"${s === i.font_size ? " selected" : ""}>${s}</option>`).join("")}
@@ -511,11 +537,28 @@ function renderHistory(items) {
           <button type="button" class="history-send-button" data-history-id="${escapeHtml(i.id)}" ${disableSend ? "disabled" : ""}>Send to Robot</button>
           <button type="button" class="history-delete-button" data-history-id="${escapeHtml(i.id)}">Delete</button>
         </div>
-      </div>`
+      </div>`;
+      }
     )
     .join("");
 
   updateHistoryActionButtons();
+}
+
+function hydrateBrailleHistoryRows(items = transcriptHistory) {
+  items.forEach((item) => {
+    if (!item || item.braille_grade === "off" || item.braille_text) return;
+    fetchBraillePreview(item.text, item.language, Number(item.braille_grade))
+      .then((brailleText) => {
+        updateHistoryItem(item.id, { braille_text: brailleText });
+        const textEl = historyList.querySelector(`[data-history-text-id="${item.id}"]`);
+        if (textEl) {
+          textEl.textContent = brailleText;
+          textEl.style.fontFamily = "";
+        }
+      })
+      .catch(() => {});
+  });
 }
 
 function syncRobotControls() {
@@ -525,6 +568,7 @@ function syncRobotControls() {
   const canUnpair = !robotBusy && Boolean(pairedRobot);
   const canSendTranscript = !robotBusy && Boolean(pairedRobot) && robotConnected && currentTranscriptId !== null;
   const canControlMotion = Boolean(pairedRobot) && robotConnected && !robotJobInFlight;
+  const canCalibratePen = Boolean(pairedRobot) && robotConnected && !robotJobInFlight;
 
   discoverRobotsButton.disabled = robotBusy;
   pairRobotButton.disabled = !canPair;
@@ -533,6 +577,22 @@ function syncRobotControls() {
   sendTranscriptButton.disabled = !canSendTranscript;
   homeRobotButton.disabled = !canControlMotion;
   calibrateRobotButton.disabled = !canControlMotion;
+  penServoSlider.disabled = !canCalibratePen;
+  penSaveUpButton.disabled = !canCalibratePen;
+  penSaveDownButton.disabled = !canCalibratePen;
+  penSavePunchButton.disabled = !canCalibratePen;
+  if (!canCalibratePen) {
+    pendingPenDuty = null;
+  }
+  if (penCalibrationPanel && !penCalibrationPanel.hidden) {
+    if (!pairedRobot || !robotConnected) {
+      setPenCalibrationMessage("");
+    } else if (robotJobInFlight) {
+      setPenCalibrationMessage("Pen calibration is disabled while the robot is moving.");
+    } else if (penCalibrationMessage?.textContent === "Pen calibration is disabled while the robot is moving.") {
+      setPenCalibrationMessage("");
+    }
+  }
   if (!robotJobInFlight) abortRobotButton.disabled = true;
   if (previewSendButton) {
     const hasPreview = Boolean(currentPreviewData?.operations?.length);
@@ -570,6 +630,9 @@ function renderRobotState(payload, options = {}) {
 
   if (!payload.paired || !payload.robot) {
     robotConnection.textContent = "No robot paired.";
+    penCalibrationPanel.hidden = true;
+    penConfigInitialized = false;
+    setPenCalibrationMessage("");
     if (payload.warning) {
       robotStatus.textContent = payload.warning;
     } else if (!preserveStatus) {
@@ -605,6 +668,8 @@ function renderRobotState(payload, options = {}) {
   if ((motionStatus === "running" || motionStatus === "queued") && !robotJobInFlight) {
     startJobPolling();
   }
+
+  loadPenConfig();
 }
 
 function renderDiscoveredRobots(items) {
@@ -688,6 +753,7 @@ function loadHistory() {
   transcriptHistory = loadTranscriptHistory();
   transcriptHistory.forEach((item) => ensureFont(item.font_family, item.font_url));
   renderHistory(transcriptHistory);
+  hydrateBrailleHistoryRows(transcriptHistory);
 }
 
 async function discoverRobots() {
@@ -1013,6 +1079,135 @@ async function abortRobotJob() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Pen servo calibration slider
+// ---------------------------------------------------------------------------
+
+let penSetInFlight = false;
+let pendingPenDuty = null;
+let lastPenDutySent = null;
+let penConfigInitialized = false;
+
+async function loadPenConfig() {
+  if (!pairedRobot || !robotConnected) return;
+  try {
+    const data = await fetchJson("/robot/pen/config");
+    const minDuty = Number(data.min_duty ?? DEFAULT_PEN_DUTY_MIN);
+    const maxDuty = Number(data.max_duty ?? DEFAULT_PEN_DUTY_MAX);
+    penServoSlider.min = String(minDuty);
+    penServoSlider.max = String(maxDuty);
+    let sliderDuty = Number(penServoSlider.value);
+    if (!penConfigInitialized || !Number.isFinite(sliderDuty)) {
+      sliderDuty = Number(data.current_duty ?? data.pen_up_duty ?? data.pen_down_duty ?? data.punch_duty ?? 8000);
+      penConfigInitialized = true;
+    }
+    sliderDuty = Math.min(maxDuty, Math.max(minDuty, sliderDuty));
+    penServoSlider.value = String(sliderDuty);
+    penServoValue.textContent = String(sliderDuty);
+    lastPenDutySent = Number(data.current_duty ?? sliderDuty);
+    penUpValue.textContent = data.pen_up_duty || "?";
+    penDownValue.textContent = data.pen_down_duty || "?";
+    penPunchValue.textContent = data.punch_duty || "?";
+    penCalibrationPanel.hidden = false;
+    penCalibrationStatus.style.color = "";
+    setPenCalibrationMessage("");
+  } catch {
+    penCalibrationPanel.hidden = true;
+    setPenCalibrationMessage("");
+  }
+  syncRobotControls();
+}
+
+async function flushPenSet() {
+  if (penSetInFlight || pendingPenDuty === null || !pairedRobot || !robotConnected) return;
+  const duty = pendingPenDuty;
+  pendingPenDuty = null;
+  if (duty === lastPenDutySent) return;
+  penSetInFlight = true;
+  try {
+    await fetchJson("/robot/pen/set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ duty }),
+    });
+    lastPenDutySent = duty;
+    penCalibrationStatus.style.color = "";
+    setPenCalibrationMessage("");
+  } catch (e) {
+    setPenCalibrationMessage("Error: " + (e.message || "pen/set failed"), true);
+  } finally {
+    penSetInFlight = false;
+    if (pendingPenDuty !== null && pendingPenDuty !== lastPenDutySent) {
+      void flushPenSet();
+    }
+  }
+}
+
+function onPenSliderInput() {
+  const duty = Number(penServoSlider.value);
+  penServoValue.textContent = duty;
+  pendingPenDuty = duty;
+  void flushPenSet();
+}
+
+async function savePenUp() {
+  const duty = Number(penServoSlider.value);
+  try {
+    const data = await fetchJson("/robot/pen/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pen_up_duty: duty }),
+    });
+    penUpValue.textContent = data.pen_up_duty || duty;
+    penCalibrationStatus.style.color = "";
+    setPenCalibrationMessage(`Saved pen-up at ${duty}.`);
+  } catch (e) {
+    setPenCalibrationMessage(e.message || "Unable to save pen-up position.", true);
+  }
+}
+
+async function savePenDown() {
+  const duty = Number(penServoSlider.value);
+  try {
+    const data = await fetchJson("/robot/pen/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pen_down_duty: duty }),
+    });
+    penDownValue.textContent = data.pen_down_duty || duty;
+    penCalibrationStatus.style.color = "";
+    setPenCalibrationMessage(`Saved writing depth at ${duty}.`);
+  } catch (e) {
+    setPenCalibrationMessage(e.message || "Unable to save writing depth.", true);
+  }
+}
+
+async function savePenPunch() {
+  const duty = Number(penServoSlider.value);
+  try {
+    const data = await fetchJson("/robot/pen/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ punch_duty: duty }),
+    });
+    const savedDuty = Number(data.punch_duty || duty);
+    penPunchValue.textContent = savedDuty;
+    penServoSlider.value = String(savedDuty);
+    penServoValue.textContent = String(savedDuty);
+    lastPenDutySent = savedDuty;
+    penCalibrationStatus.style.color = "";
+    setPenCalibrationMessage(`Saved braille depth at ${savedDuty}.`);
+  } catch (e) {
+    setPenCalibrationMessage(e.message || "Unable to save braille depth.", true);
+  }
+}
+
+penServoSlider.addEventListener("input", onPenSliderInput);
+penSaveUpButton.addEventListener("click", savePenUp);
+penSaveDownButton.addEventListener("click", savePenDown);
+penSavePunchButton.addEventListener("click", savePenPunch);
+
+
 async function sendPreviewToRobot() {
   if (!currentPreviewData || !currentPreviewData.operations || currentPreviewData.operations.length === 0) {
     if (previewJobStatus) {
@@ -1187,12 +1382,14 @@ historyList.addEventListener("change", (event) => {
     updateHistoryItem(id, { braille_grade: grade });
 
     if (grade === "off") {
+      updateHistoryItem(id, { braille_text: "" });
       textEl.textContent = item.text;
       textEl.style.fontFamily = cssFontFamily(item.font_family);
     } else {
       braillePicker.disabled = true;
       fetchBraillePreview(item.text, item.language, grade)
         .then((brailleText) => {
+          updateHistoryItem(id, { braille_text: brailleText });
           textEl.textContent = brailleText;
           textEl.style.fontFamily = "";
         })
@@ -1297,11 +1494,13 @@ brailleSelect.addEventListener("change", () => {
     const textEl = historyList.querySelector(`[data-history-text-id="${currentTranscriptId}"]`);
     if (item && textEl) {
       if (grade === "off") {
+        updateHistoryItem(currentTranscriptId, { braille_text: "" });
         textEl.textContent = item.text;
         textEl.style.fontFamily = cssFontFamily(item.font_family);
       } else {
         fetchBraillePreview(item.text, item.language, grade)
           .then((brailleText) => {
+            updateHistoryItem(currentTranscriptId, { braille_text: brailleText });
             textEl.textContent = brailleText;
             textEl.style.fontFamily = "";
           })

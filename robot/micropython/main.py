@@ -1,4 +1,8 @@
-import socket
+try:
+    import socket
+except ImportError:
+    socket = None
+
 import time
 import ujson
 import ubinascii
@@ -225,8 +229,6 @@ def _set_pending_job(action, payload, kind):
     status = _motion.get_status()["status"]
     if status == STATUS_RUNNING or _pending_job is not None:
         return None, "robot is busy"
-    if not _motion.homed and kind not in ("home", "calibrate"):
-        return None, "robot is not homed"
     if not _motion.calibrated and kind not in ("home", "calibrate"):
         return None, "robot is not calibrated — run /calibrate first"
 
@@ -244,6 +246,15 @@ def _set_pending_job(action, payload, kind):
 
     _pending_job = {"kind": kind, "job_id": job_id, "payload": payload}
     return job_id, None
+
+
+def _pen_motion_error():
+    if _motion is None:
+        return "motion controller unavailable"
+    status = _motion.get_status()["status"]
+    if status in (STATUS_RUNNING, "queued") or _pending_job is not None:
+        return "pen control unavailable while motion is active"
+    return None
 
 
 def _validate_render_payload(payload):
@@ -376,6 +387,110 @@ def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=F
         log("move queued x={} y={} job_id={}".format(x, y, job_id))
         return 202, {"accepted": True, "job_id": job_id, "kind": "move"}
 
+    if method == "POST" and path == "/pen/up":
+        err = _pen_motion_error()
+        if err is not None:
+            return 409, {"error": err}
+        _motion.pen.up()
+        return 200, {"pen": _motion.pen.state, "duty": _motion.pen.current_duty}
+
+    if method == "POST" and path == "/pen/down":
+        err = _pen_motion_error()
+        if err is not None:
+            return 409, {"error": err}
+        _motion.pen.down()
+        return 200, {"pen": _motion.pen.state, "duty": _motion.pen.current_duty}
+
+    if method == "GET" and path == "/pen/config":
+        if _motion is None:
+            return 503, {"error": "motion controller unavailable"}
+        return 200, {
+            "min_duty": pins.SERVO_MIN_DUTY,
+            "max_duty": pins.SERVO_MAX_DUTY,
+            "pen_up_duty": _motion.pen.up_duty,
+            "pen_down_duty": _motion.pen.down_duty,
+            "punch_duty": _motion.pen.punch_duty,
+            "state": _motion.pen.state,
+            "current_duty": _motion.pen.current_duty,
+        }
+
+    if method == "POST" and path == "/pen/set":
+        err = _pen_motion_error()
+        if err is not None:
+            return 409, {"error": err}
+        try:
+            duty = int(payload.get("duty", 0))
+        except (TypeError, ValueError):
+            return 400, {"error": "duty must be an integer"}
+        if not (pins.SERVO_MIN_DUTY <= duty <= pins.SERVO_MAX_DUTY):
+            return 400, {
+                "error": "duty must be between {} and {}".format(
+                    pins.SERVO_MIN_DUTY, pins.SERVO_MAX_DUTY,
+                )
+            }
+        applied = _motion.pen.set_position(duty)
+        return 200, {"pen": _motion.pen.state, "duty": applied}
+
+    if method == "POST" and path == "/pen/idle":
+        err = _pen_motion_error()
+        if err is not None:
+            return 409, {"error": err}
+        _motion.pen.idle()
+        return 200, {"pen": _motion.pen.state, "duty": _motion.pen.current_duty}
+
+    if method == "POST" and path == "/pen/save":
+        err = _pen_motion_error()
+        if err is not None:
+            return 409, {"error": err}
+        if "pen_up_duty" in payload:
+            try:
+                up_duty = int(payload["pen_up_duty"])
+            except (TypeError, ValueError):
+                return 400, {"error": "pen_up_duty must be an integer"}
+            if not (pins.SERVO_MIN_DUTY <= up_duty <= pins.SERVO_MAX_DUTY):
+                return 400, {
+                    "error": "pen_up_duty must be between {} and {}".format(
+                        pins.SERVO_MIN_DUTY, pins.SERVO_MAX_DUTY,
+                    )
+                }
+            _motion.pen.up_duty = up_duty
+        if "pen_down_duty" in payload:
+            try:
+                down_duty = int(payload["pen_down_duty"])
+            except (TypeError, ValueError):
+                return 400, {"error": "pen_down_duty must be an integer"}
+            if not (pins.SERVO_MIN_DUTY <= down_duty <= pins.SERVO_MAX_DUTY):
+                return 400, {
+                    "error": "pen_down_duty must be between {} and {}".format(
+                        pins.SERVO_MIN_DUTY, pins.SERVO_MAX_DUTY,
+                    )
+                }
+            _motion.pen.down_duty = down_duty
+            if _motion.pen._punch_tracks_down and "punch_duty" not in payload:
+                _motion.pen.punch_duty = down_duty
+        if "punch_duty" in payload:
+            try:
+                punch_duty = int(payload["punch_duty"])
+            except (TypeError, ValueError):
+                return 400, {"error": "punch_duty must be an integer"}
+            if not (pins.SERVO_MIN_DUTY <= punch_duty <= pins.SERVO_MAX_DUTY):
+                return 400, {
+                    "error": "punch_duty must be between {} and {}".format(
+                        pins.SERVO_MIN_DUTY, pins.SERVO_MAX_DUTY,
+                    )
+                }
+            _motion.pen.punch_duty = punch_duty
+            _motion.pen._punch_tracks_down = False
+        _motion.pen.save_config()
+        log("pen config saved up={} down={} punch={}".format(
+            _motion.pen.up_duty, _motion.pen.down_duty, _motion.pen.punch_duty,
+        ))
+        return 200, {
+            "pen_up_duty": _motion.pen.up_duty,
+            "pen_down_duty": _motion.pen.down_duty,
+            "punch_duty": _motion.pen.punch_duty,
+        }
+
     if method == "POST" and path == "/render":
         mode = payload.get("mode", "write")
         if "operations" not in payload:
@@ -426,8 +541,21 @@ def handle_request(client, ip_address):
 
 
 def serial_write(cdc, data):
+    """Write all bytes to the CDC data channel. MicroPython's CDCInterface
+    has a small internal buffer (~256 bytes). A single .write() of a large
+    payload silently truncates. We chunk the write and yield between chunks
+    so the USB stack can flush each one to the host."""
     try:
-        cdc.write(data)
+        mv = memoryview(data)
+        offset = 0
+        while offset < len(data):
+            chunk = mv[offset:offset + 128]
+            n = cdc.write(chunk)
+            if n is None:
+                n = len(chunk)
+            offset += n
+            if offset < len(data):
+                time.sleep_ms(2)
     except Exception as exc:
         log("serial write error={}".format(exc))
 
@@ -572,6 +700,10 @@ def setup_wifi(serial_buf, cdc):
         time.sleep(0.5)
         if cdc is not None:
             serial_buf = drain_serial(cdc, serial_buf, ip_address)
+        # Allow the first USB-queued job to start during Wi-Fi setup instead
+        # of sitting in "queued" until the 30 s wait finishes.
+        if _pending_job is not None and _motion is not None:
+            _run_pending_job()
 
     if wlan.isconnected():
         ip_address = wlan.ifconfig()[0]
@@ -585,6 +717,9 @@ def setup_wifi(serial_buf, cdc):
 def setup_network_servers(poller):
     tcp_server = None
     udp_server = None
+    if socket is None:
+        log("socket module unavailable — no TCP/UDP. USB serial only.")
+        return tcp_server, udp_server
     try:
         tcp_address = socket.getaddrinfo("0.0.0.0", secrets.LISTEN_PORT)[0][-1]
         tcp_server = socket.socket()
@@ -649,17 +784,26 @@ def _run_pending_job():
                 result["travel_x_mm"], result["travel_y_mm"]))
 
         elif kind == "jog":
+            if not _motion.homed:
+                log("auto-home before jog job_id={}".format(job_id))
+                _motion.home()
             _motion.move_by_mm(payload["dx"], payload["dy"])
             js["status"] = STATUS_COMPLETE
             log("jog complete dx={} dy={}".format(payload["dx"], payload["dy"]))
 
         elif kind == "move":
+            if not _motion.homed:
+                log("auto-home before move job_id={}".format(job_id))
+                _motion.home()
             _motion.move_to_mm(payload["x"], payload["y"])
             js["status"] = STATUS_COMPLETE
             log("move complete x={} y={}".format(payload["x"], payload["y"]))
 
         elif kind == "render":
+            log("home before render job_id={}".format(job_id))
+            _motion.home()
             _motion.execute_operations(payload["operations"], job_id=job_id)
+            _motion.home()
             log("render complete job_id={}".format(job_id))
 
         else:
@@ -690,6 +834,15 @@ def serve():
 
     if cdc_data is not None:
         log("CDC data channel available")
+
+    # Create motion controller BEFORE WiFi setup so serial commands that
+    # arrive during the WiFi wait (up to 30 s) already see _motion.
+    _motion = Motion()
+    if _motion.calibrated:
+        log("motion controller ready: work_area={}x{}mm steps_per_mm={}".format(
+            round(_motion.work_area_x_mm, 1), round(_motion.work_area_y_mm, 1), pins.STEPS_PER_MM))
+    else:
+        log("motion controller ready: NOT CALIBRATED — run /calibrate before sending jobs")
 
     wlan, ip_address, serial_buf = setup_wifi(serial_buf, cdc_data)
 
@@ -731,12 +884,10 @@ def serve():
         if cdc_data is not None:
             serial_buf = drain_serial(cdc_data, serial_buf, ip_address)
 
-    _motion = Motion(on_yield=lambda: service_io(0))
-    if _motion.calibrated:
-        log("motion controller ready: work_area={}x{}mm steps_per_mm={}".format(
-            round(_motion.work_area_x_mm, 1), round(_motion.work_area_y_mm, 1), pins.STEPS_PER_MM))
-    else:
-        log("motion controller ready: NOT CALIBRATED — run /calibrate before sending jobs")
+    # Now that service_io is defined, give it to motion as the yield callback
+    # so the server stays responsive during long moves.
+    _motion._on_yield = lambda: service_io(0)
+    log("serve loop starting")
 
     while True:
         if _pending_job is not None:

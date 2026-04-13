@@ -15,7 +15,7 @@ PAPER_OFFSET = {"x": 0, "y": 0}
 
 DEFAULT_MARGINS = {"top": 10, "right": 10, "bottom": 10, "left": 10}
 
-DEFAULT_PEN_TIP_MM = 0.7
+DEFAULT_PEN_TIP_MM = 0.2
 DEFAULT_FONT_SIZE_MM = 5.0
 
 

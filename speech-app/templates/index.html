@@ -91,6 +91,24 @@
           <span id="robotJobIndicator" class="robot-job-indicator" hidden></span>
         </div>
 
+        <fieldset class="pen-calibration" id="penCalibrationPanel" hidden>
+          <legend>Pen Servo Calibration</legend>
+          <label>
+            Servo position
+            <input type="range" id="penServoSlider" min="1600" max="8000" step="25" value="8000" />
+            <span id="penServoValue">8000</span>
+          </label>
+          <div class="controls">
+            <button type="button" id="penSaveUpButton" title="Remember current slider position as pen-up">Save as Up</button>
+            <button type="button" id="penSaveDownButton" title="Remember current slider position as writing depth">Save as Write</button>
+            <button type="button" id="penSavePunchButton" title="Remember current slider position as braille punch depth">Save as Braille</button>
+          </div>
+          <p id="penCalibrationStatus" class="robot-status">
+            Up: <span id="penUpValue">?</span> | Write: <span id="penDownValue">?</span> | Braille: <span id="penPunchValue">?</span>
+          </p>
+          <p id="penCalibrationMessage" class="robot-status" hidden></p>
+        </fieldset>
+
         <p id="robotStatus" class="robot-status">
           Pair the speech app to your Pico over USB or the current local network.
         </p>

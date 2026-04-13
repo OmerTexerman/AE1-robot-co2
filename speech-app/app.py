@@ -29,12 +29,15 @@ from robot_client import (
     RobotClientError,
     close_transport,
     fetch_job_status,
+    fetch_pen_config,
     send_abort_command,
     send_calibrate_command,
     send_home_command,
     send_jog_command,
     send_move_command,
     send_paths_job,
+    send_pen_save,
+    send_pen_set,
 )
 from robot_service import (
     discover_available_robots,
@@ -449,6 +452,57 @@ def robot_abort():
         app.logger.warning("robot_abort failed: %s", exc)
         return jsonify({"error": str(exc)}), 502
     return jsonify(result)
+
+
+@app.get("/robot/pen/config")
+def robot_pen_config():
+    config, err = _require_paired_robot()
+    if err:
+        return err
+    try:
+        return jsonify(fetch_pen_config(config))
+    except RobotClientError as exc:
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.post("/robot/pen/set")
+def robot_pen_set():
+    config, err = _require_paired_robot()
+    if err:
+        return err
+    payload = request_payload()
+    try:
+        duty = int(payload.get("duty", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "duty must be a number"}), 400
+    try:
+        return jsonify(send_pen_set(config, duty))
+    except RobotClientError as exc:
+        return jsonify({"error": str(exc)}), 502
+
+
+@app.post("/robot/pen/save")
+def robot_pen_save():
+    config, err = _require_paired_robot()
+    if err:
+        return err
+    payload = request_payload()
+    up = payload.get("pen_up_duty")
+    down = payload.get("pen_down_duty")
+    punch = payload.get("punch_duty")
+    try:
+        if up is not None:
+            up = int(up)
+        if down is not None:
+            down = int(down)
+        if punch is not None:
+            punch = int(punch)
+    except (TypeError, ValueError):
+        return jsonify({"error": "duty values must be numbers"}), 400
+    try:
+        return jsonify(send_pen_save(config, pen_up_duty=up, pen_down_duty=down, punch_duty=punch))
+    except RobotClientError as exc:
+        return jsonify({"error": str(exc)}), 502
 
 
 @app.get("/robot/job")

@@ -127,6 +127,7 @@ class Motion:
             "homed":        self.homed,
             "calibrated":   self.calibrated,
             "pen":          self.pen.state,
+            "switches":     self.switch_state(),
             "error":        self._job_state["error"],
         }
         if self.calibrated:
@@ -176,7 +177,7 @@ class Motion:
             self._stepA.value(0); self._stepB.value(0)
             time.sleep_us(half_us)
 
-    def _move_until_switch(self, dA, dB, target_switch, max_steps=20000, half_us=None):
+    def _move_until_switch(self, dA, dB, target_switch, max_steps=20000, half_us=None, abort_other_switches=True):
         """Drive in (dA, dB) direction until target_switch is pressed."""
         if half_us is None:
             half_us = pins.HOMING_HALF_PERIOD_US
@@ -185,15 +186,18 @@ class Motion:
         time.sleep_ms(2)
         for i in range(max_steps):
             if target_switch.value() == 0:
+                self._stepA.value(0); self._stepB.value(0)
+                time.sleep_ms(pins.HOME_SWITCH_SETTLE_MS)
                 return ("hit", i)
-            if self._sw_y_min is not target_switch and self._sw_y_min.value() == 0:
-                return ("abort:YMIN", i)
-            if self._sw_x_min is not target_switch and self._sw_x_min.value() == 0:
-                return ("abort:XMIN", i)
-            if self._sw_y_max is not target_switch and self._sw_y_max.value() == 0:
-                return ("abort:YMAX", i)
-            if self._sw_x_max is not target_switch and self._sw_x_max.value() == 0:
-                return ("abort:XMAX", i)
+            if abort_other_switches:
+                if self._sw_y_min is not target_switch and self._sw_y_min.value() == 0:
+                    return ("abort:YMIN", i)
+                if self._sw_x_min is not target_switch and self._sw_x_min.value() == 0:
+                    return ("abort:XMIN", i)
+                if self._sw_y_max is not target_switch and self._sw_y_max.value() == 0:
+                    return ("abort:YMAX", i)
+                if self._sw_x_max is not target_switch and self._sw_x_max.value() == 0:
+                    return ("abort:XMAX", i)
             self._stepA.value(1); self._stepB.value(1)
             time.sleep_us(half_us)
             self._stepA.value(0); self._stepB.value(0)
@@ -206,24 +210,23 @@ class Motion:
         """Drive to top-left, set logical position to (0, 0). Pen lifted first."""
         self._abort_requested = False
         self.pen.up()
+        self.homed = False
 
         backoff_steps = int(pins.HOME_BACKOFF_MM * pins.STEPS_PER_MM)
 
         # -Y (up) toward Y_MIN: A+ B-
-        result, _ = self._move_until_switch(1, 0, self._sw_y_min)
+        result, _ = self._move_until_switch(1, 0, self._sw_y_min, abort_other_switches=False)
         if result != "hit":
-            self.homed = False
             raise MotionError("Y homing failed: " + result)
         # +Y backoff (A- B+) — raw open loop, ignores the still-pressed switch
-        self._move_open_loop(0, 1, backoff_steps)
+        self._move_open_loop(0, 1, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)
 
         # -X (left) toward X_MIN: A+ B+
-        result, _ = self._move_until_switch(1, 1, self._sw_x_min)
+        result, _ = self._move_until_switch(1, 1, self._sw_x_min, abort_other_switches=False)
         if result != "hit":
-            self.homed = False
             raise MotionError("X homing failed: " + result)
         # +X backoff (A- B-)
-        self._move_open_loop(0, 0, backoff_steps)
+        self._move_open_loop(0, 0, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)
 
         self.position_steps = [0, 0]
         self.homed = True
@@ -317,6 +320,12 @@ class Motion:
         dy_steps = target_y_steps - self.position_steps[1]
         return self.move_by_steps(dx_steps, dy_steps, half_us)
 
+    def _travel_half_us(self, half_us):
+        return pins.TRAVEL_HALF_PERIOD_US if half_us is None else half_us
+
+    def _draw_half_us(self, half_us):
+        return pins.DRAW_HALF_PERIOD_US if half_us is None else half_us
+
     def execute_operations(self, operations, job_id=None, half_us=None):
         """Execute a toolpath produced by speech-app/toolpath.py.
 
@@ -365,6 +374,7 @@ class Motion:
 
             self._job_state["op_index"] = len(operations)
             self._job_state["status"] = STATUS_COMPLETE
+            self.pen.up()
         except MotionError as exc:
             if self._abort_requested:
                 self._job_state["status"] = STATUS_ABORTED
@@ -382,26 +392,29 @@ class Motion:
         pts = op.get("points") or []
         if len(pts) < 2:
             return
+        start = pts[0]
         self.pen.up()
-        self.move_to_mm(pts[0][0], pts[0][1], half_us)
+        self.move_to_mm(start[0], start[1], self._travel_half_us(half_us))
         self.pen.down()
+        time.sleep_ms(pins.PEN_DOWN_SETTLE_MS)
         for pt in pts[1:]:
-            self.move_to_mm(pt[0], pt[1], half_us)
+            self.move_to_mm(pt[0], pt[1], self._draw_half_us(half_us))
+        self.pen.up()
 
     def _execute_travel(self, op, half_us):
         pts = op.get("points") or []
         if not pts:
             return
+        target = pts[-1]
         self.pen.up()
-        for pt in pts:
-            self.move_to_mm(pt[0], pt[1], half_us)
+        self.move_to_mm(target[0], target[1], self._travel_half_us(half_us))
 
     def _execute_punch(self, op, half_us):
         pt = op.get("point")
         if pt is None:
             return
         self.pen.up()
-        self.move_to_mm(pt[0], pt[1], half_us)
+        self.move_to_mm(pt[0], pt[1], self._travel_half_us(half_us))
         self.pen.punch()
 
     def _check_bounds(self, x_mm, y_mm):
@@ -419,39 +432,45 @@ class Motion:
         measured travel in microsteps and mm. Updates `homed` to True at the
         end (re-homes). Useful as a diagnostic to verify steps_per_mm and
         detect mechanical wear / belt slip / step loss."""
+        self.pen.up()
         self.home()
+        self.homed = False
         backoff_steps = int(pins.HOME_BACKOFF_MM * pins.STEPS_PER_MM)
+        try:
+            self.pen.up()
+            # +Y (down): A- B+
+            r, travel_y = self._move_until_switch(0, 1, self._sw_y_max, abort_other_switches=False)
+            if r != "hit":
+                raise MotionError("Y calibration failed: " + r)
+            self._move_open_loop(1, 0, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)   # -Y backoff (A+ B-)
 
-        # +Y (down): A- B+
-        r, travel_y = self._move_until_switch(0, 1, self._sw_y_max)
-        if r != "hit":
-            raise MotionError("Y calibration failed: " + r)
-        self._move_open_loop(1, 0, backoff_steps)   # -Y backoff (A+ B-)
+            # +X (right): A- B-
+            r, travel_x = self._move_until_switch(0, 0, self._sw_x_max, abort_other_switches=False)
+            if r != "hit":
+                raise MotionError("X calibration failed: " + r)
+            self._move_open_loop(1, 1, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)   # -X backoff (A+ B+)
 
-        # +X (right): A- B-
-        r, travel_x = self._move_until_switch(0, 0, self._sw_x_max)
-        if r != "hit":
-            raise MotionError("X calibration failed: " + r)
-        self._move_open_loop(1, 1, backoff_steps)   # -X backoff (A+ B+)
+            self.home()
 
-        self.home()
+            full_x_steps = travel_x + backoff_steps
+            full_y_steps = travel_y + backoff_steps
+            travel_x_mm = full_x_steps / pins.STEPS_PER_MM
+            travel_y_mm = full_y_steps / pins.STEPS_PER_MM
 
-        full_x_steps = travel_x + backoff_steps
-        full_y_steps = travel_y + backoff_steps
-        travel_x_mm = full_x_steps / pins.STEPS_PER_MM
-        travel_y_mm = full_y_steps / pins.STEPS_PER_MM
+            # Persist to flash and update live state so the work area is
+            # immediately available without a reboot.
+            self._save_calibration(travel_x_mm, travel_y_mm)
+            self._apply_calibration(travel_x_mm, travel_y_mm)
 
-        # Persist to flash and update live state so the work area is
-        # immediately available without a reboot.
-        self._save_calibration(travel_x_mm, travel_y_mm)
-        self._apply_calibration(travel_x_mm, travel_y_mm)
-
-        return {
-            "travel_x_steps": full_x_steps,
-            "travel_y_steps": full_y_steps,
-            "travel_x_mm":    travel_x_mm,
-            "travel_y_mm":    travel_y_mm,
-            "work_area_x_mm": self.work_area_x_mm,
-            "work_area_y_mm": self.work_area_y_mm,
-            "steps_per_mm":   pins.STEPS_PER_MM,
-        }
+            return {
+                "travel_x_steps": full_x_steps,
+                "travel_y_steps": full_y_steps,
+                "travel_x_mm":    travel_x_mm,
+                "travel_y_mm":    travel_y_mm,
+                "work_area_x_mm": self.work_area_x_mm,
+                "work_area_y_mm": self.work_area_y_mm,
+                "steps_per_mm":   pins.STEPS_PER_MM,
+            }
+        except MotionError:
+            self.homed = False
+            raise
