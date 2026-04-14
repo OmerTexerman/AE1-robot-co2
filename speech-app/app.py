@@ -9,7 +9,12 @@ from typing import Any
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
-from braille_translator import available_grades, normalize_grade, translate_to_braille_text
+from braille_translator import (
+    BrailleUnavailableError,
+    available_grades,
+    normalize_grade,
+    translate_to_braille_text,
+)
 from font_selector import choose_font
 from google_fonts import get_fonts_for_subset, warm_cache
 from paper_sizes import (
@@ -76,14 +81,35 @@ logging.basicConfig(
 )
 
 
+class RequestPayloadError(ValueError):
+    pass
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
 
 
+@app.errorhandler(RequestPayloadError)
+def handle_request_payload_error(exc: RequestPayloadError):
+    return jsonify({"error": str(exc)}), 400
+
+
+@app.errorhandler(BrailleUnavailableError)
+def handle_braille_unavailable_error(exc: BrailleUnavailableError):
+    return jsonify({"error": str(exc)}), 503
+
+
 def request_payload() -> dict:
+    if not request.content_length:
+        return {}
+
     payload = request.get_json(silent=True)
-    return payload if isinstance(payload, dict) else {}
+    if payload is None:
+        raise RequestPayloadError("Request body must be valid JSON.")
+    if not isinstance(payload, dict):
+        raise RequestPayloadError("Request body must be a JSON object.")
+    return payload
 
 
 def parse_discovery_port(payload: dict) -> int:
@@ -140,6 +166,18 @@ def build_toolpath_from_payload(payload: dict[str, Any]) -> dict:
         render_mode=request_data["render_mode"],
         **common_kwargs,
     )
+
+
+def build_toolpath_response(payload: dict[str, Any], *, log_context: str) -> tuple[dict | None, Any | None]:
+    try:
+        return build_toolpath_from_payload(payload), None
+    except BrailleUnavailableError as exc:
+        return None, (jsonify({"error": str(exc)}), 503)
+    except ValueError as exc:
+        return None, (jsonify({"error": str(exc)}), 400)
+    except Exception as exc:
+        app.logger.exception("%s failed: %s", log_context, exc)
+        return None, (jsonify({"error": f"Toolpath generation failed: {exc}"}), 500)
 
 
 
@@ -295,13 +333,12 @@ def robot_render():
     mode = payload.get("mode", "write")
 
     if operations is None:
-        try:
-            toolpath = build_toolpath_from_payload(payload)
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            app.logger.exception("robot_render toolpath generation failed: %s", exc)
-            return jsonify({"error": f"Toolpath generation failed: {exc}"}), 500
+        toolpath, error_response = build_toolpath_response(
+            payload,
+            log_context="robot_render toolpath generation",
+        )
+        if error_response is not None:
+            return error_response
         operations = toolpath.get("operations", [])
         mode = toolpath.get("mode", mode)
 
@@ -497,14 +534,9 @@ def hershey_fonts():
 @app.post("/toolpath/preview")
 def toolpath_preview():
     payload = request_payload()
-    try:
-        result = build_toolpath_from_payload(payload)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        app.logger.exception("toolpath_preview failed: %s", exc)
-        return jsonify({"error": f"Toolpath generation failed: {exc}"}), 500
-
+    result, error_response = build_toolpath_response(payload, log_context="toolpath_preview")
+    if error_response is not None:
+        return error_response
     return jsonify(result)
 
 

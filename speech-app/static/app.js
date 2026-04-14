@@ -50,6 +50,24 @@ const previewSkip = document.getElementById("previewSkip");
 const previewSpeed = document.getElementById("previewSpeed");
 const previewSendButton = document.getElementById("previewSendButton");
 const previewJobStatus = document.getElementById("previewJobStatus");
+const PREVIEW_LOCKED_CONTROLS = [
+  previewPaperSize,
+  previewPaperWidth,
+  previewPaperHeight,
+  previewRenderMode,
+  previewFontSize,
+  previewPenTip,
+  previewMarginTop,
+  previewMarginRight,
+  previewMarginBottom,
+  previewMarginLeft,
+  previewOffsetX,
+  previewOffsetY,
+  previewFontTrigger,
+  previewPlayPause,
+  previewRestart,
+  previewSkip,
+];
 
 const homeRobotButton = document.getElementById("homeRobotButton");
 const calibrateRobotButton = document.getElementById("calibrateRobotButton");
@@ -120,6 +138,8 @@ let robotJobPollTimer = null;
 let robotJobInFlight = false;
 let robotJobInPreviewMode = false;
 let lastRobotJobStatus = null;
+let currentBraillePreviewVersion = 0;
+const historyBrailleRequestVersions = Object.create(null);
 
 function escapeHtml(s) {
   const d = document.createElement("div");
@@ -153,14 +173,23 @@ async function applyBraillePreview() {
   const text = current ? current.text : DEFAULT_TRANSCRIPT_TEXT;
   const language = current ? current.language : "en";
   const snapshotId = currentTranscriptId;
+  const snapshotGrade = brailleGrade();
+  const requestVersion = ++currentBraillePreviewVersion;
 
   try {
     const brailleText = await fetchBraillePreview(
       text,
       language,
-      brailleGrade(),
+      snapshotGrade,
     );
-    if (!brailleActive() || currentTranscriptId !== snapshotId) return;
+    if (
+      !brailleActive()
+      || currentTranscriptId !== snapshotId
+      || brailleGrade() !== snapshotGrade
+      || currentBraillePreviewVersion !== requestVersion
+    ) {
+      return;
+    }
     updateStyledText(transcript, { text: brailleText, fontFamily: "" });
     braillePreviewActive = true;
   } catch {
@@ -168,6 +197,7 @@ async function applyBraillePreview() {
 }
 
 function restoreBraillePreview() {
+  currentBraillePreviewVersion += 1;
   if (!braillePreviewActive) return;
   braillePreviewActive = false;
   const current = getCurrentTranscript();
@@ -218,6 +248,12 @@ function setElementDisplay(element, visible) {
   }
 }
 
+function setDisabled(elements, disabled) {
+  for (const element of elements) {
+    element.disabled = disabled;
+  }
+}
+
 function updateHistoryText(itemId, updates) {
   const textEl = historyList.querySelector(`[data-history-text-id="${itemId}"]`);
   updateStyledText(textEl, updates);
@@ -230,6 +266,21 @@ function restoreHistoryText(item) {
 function setHistoryBrailleText(item, brailleText) {
   updateHistoryItem(item.id, { braille_text: brailleText });
   updateHistoryText(item.id, { text: brailleText, fontFamily: "" });
+}
+
+function nextHistoryBrailleRequestVersion(itemId) {
+  const nextVersion = (historyBrailleRequestVersions[itemId] || 0) + 1;
+  historyBrailleRequestVersions[itemId] = nextVersion;
+  return nextVersion;
+}
+
+function canApplyHistoryBrailleResult(itemId, expectedGrade, requestVersion) {
+  const item = findTranscriptInHistory(itemId);
+  return Boolean(
+    item
+    && item.braille_grade === expectedGrade
+    && historyBrailleRequestVersions[itemId] === requestVersion
+  );
 }
 
 function buildGoogleFontsUrl(family) {
@@ -601,9 +652,13 @@ function renderHistory(items) {
 function hydrateBrailleHistoryRows(items = transcriptHistory) {
   items.forEach((item) => {
     if (!item || item.braille_grade === "off" || item.braille_text) return;
-    fetchBraillePreview(item.text, item.language, Number(item.braille_grade))
+    const expectedGrade = Number(item.braille_grade);
+    const requestVersion = nextHistoryBrailleRequestVersion(item.id);
+    fetchBraillePreview(item.text, item.language, expectedGrade)
       .then((brailleText) => {
-        setHistoryBrailleText(item, brailleText);
+        if (canApplyHistoryBrailleResult(item.id, expectedGrade, requestVersion)) {
+          setHistoryBrailleText(item, brailleText);
+        }
       })
       .catch(() => {});
   });
@@ -617,6 +672,7 @@ function syncRobotControls() {
   const canSendTranscript = !robotBusy && Boolean(pairedRobot) && robotConnected && currentTranscriptId !== null;
   const canControlMotion = Boolean(pairedRobot) && robotConnected && !robotJobInFlight;
   const canCalibratePen = Boolean(pairedRobot) && robotConnected && !robotJobInFlight;
+  const previewLocked = previewSubmitInFlight || robotJobInPreviewMode;
 
   discoverRobotsButton.disabled = robotBusy;
   pairRobotButton.disabled = !canPair;
@@ -642,9 +698,14 @@ function syncRobotControls() {
     }
   }
   if (!robotJobInFlight) abortRobotButton.disabled = true;
+  setDisabled(PREVIEW_LOCKED_CONTROLS, previewLocked);
+  if (previewLocked && activeFontPicker?.triggerEl === previewFontTrigger) {
+    closeFontPicker();
+  }
   if (previewSendButton) {
     const hasPreview = Boolean(currentPreviewData?.operations?.length);
-    previewSendButton.disabled = !(hasPreview && Boolean(pairedRobot) && robotConnected && !robotJobInFlight);
+    previewSendButton.disabled = previewLocked
+      || !(hasPreview && Boolean(pairedRobot) && robotConnected && !robotJobInFlight);
   }
   updateHistoryActionButtons();
 }
@@ -964,13 +1025,14 @@ async function pollRobotJob() {
   lastRobotJobStatus = data;
   updateRobotJobUi(data);
 
-  if (robotJobInPreviewMode && currentPreviewData) {
+  if (robotJobInPreviewMode && (previewSubmittedData || currentPreviewData)) {
     updatePreviewWithLiveRobot(data);
   }
 
   if (isTerminalStatus(data.status)) {
     if (robotJobInPreviewMode) {
       finishLivePreview(data);
+      previewSubmittedData = null;
     }
     onRobotJobTerminal(data);
     robotJobInFlight = false;
@@ -1027,9 +1089,11 @@ function updateRobotJobUi(data) {
 }
 
 function updatePreviewWithLiveRobot(data) {
-  if (!previewAnimationState || !currentPreviewData) return;
-  const opIdx = Math.max(0, Math.min(data.op_index || 0, currentPreviewData.operations.length));
-  previewAnimationState.completedOps = currentPreviewData.operations.slice(0, opIdx).map((op) => ({
+  const previewData = previewSubmittedData || currentPreviewData;
+  if (!previewAnimationState || !previewData) return;
+  const operations = previewData.operations || [];
+  const opIdx = Math.max(0, Math.min(data.op_index || 0, operations.length));
+  previewAnimationState.completedOps = operations.slice(0, opIdx).map((op) => ({
     type: op.type,
     points: op.points,
     point: op.point,
@@ -1043,13 +1107,14 @@ function updatePreviewWithLiveRobot(data) {
 }
 
 function finishLivePreview(data) {
-  if (!previewAnimationState || !currentPreviewData) return;
-  previewAnimationState.completedOps = (currentPreviewData.operations || []).map((op) => ({
+  const previewData = previewSubmittedData || currentPreviewData;
+  if (!previewAnimationState || !previewData) return;
+  previewAnimationState.completedOps = (previewData.operations || []).map((op) => ({
     type: op.type,
     points: op.points,
     point: op.point,
   }));
-  previewAnimationState.currentSegIndex = (currentPreviewData.operations || []).length;
+  previewAnimationState.currentSegIndex = (previewData.operations || []).length;
   previewAnimationState.done = true;
   if (Array.isArray(data.position_mm) && data.position_mm.length === 2) {
     previewAnimationState.toolheadPos = data.position_mm;
@@ -1255,19 +1320,14 @@ async function sendPreviewToRobot() {
     return;
   }
 
-  stopPreviewAnimation();
-  if (previewAnimationState) {
-    previewAnimationState.completedOps = [];
-    previewAnimationState.currentSegIndex = 0;
-    previewAnimationState.currentSegProgress = 0;
-    previewAnimationState.toolheadPos = null;
-    previewAnimationState.done = false;
-    previewAnimationState.playing = false;
-    drawFrame(previewCanvas.getContext("2d"), previewCanvas, previewAnimationState);
-  }
+  const submittedData = currentPreviewData;
+  clearTimeout(previewDebounceTimer);
+  previewDebounceTimer = null;
+  previewRequestVersion += 1;
+  previewSubmitInFlight = true;
+  syncRobotControls();
 
   try {
-    previewSendButton.disabled = true;
     if (previewJobStatus) {
       previewJobStatus.hidden = false;
       previewJobStatus.textContent = "Submitting...";
@@ -1276,15 +1336,29 @@ async function sendPreviewToRobot() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        mode: currentPreviewData.mode || "write",
-        operations: currentPreviewData.operations,
+        mode: submittedData.mode || "write",
+        operations: submittedData.operations,
       }),
     });
+    previewSubmittedData = submittedData;
+    stopPreviewAnimation({ discardState: false });
+    if (previewAnimationState) {
+      previewAnimationState.completedOps = [];
+      previewAnimationState.currentSegIndex = 0;
+      previewAnimationState.currentSegProgress = 0;
+      previewAnimationState.toolheadPos = null;
+      previewAnimationState.done = false;
+      previewAnimationState.playing = false;
+      drawFrame(previewCanvas.getContext("2d"), previewCanvas, previewAnimationState);
+    }
     if (previewJobStatus) {
       previewJobStatus.textContent = `Queued on robot: ${resp.job_id || ""}`;
     }
+    previewSubmitInFlight = false;
     startJobPolling({ inPreviewMode: true });
   } catch (e) {
+    previewSubmittedData = null;
+    previewSubmitInFlight = false;
     if (previewJobStatus) {
       previewJobStatus.hidden = false;
       previewJobStatus.textContent = e.message || "Send failed.";
@@ -1409,13 +1483,17 @@ historyList.addEventListener("change", (event) => {
     updateHistoryItem(id, { braille_grade: grade });
 
     if (grade === "off") {
+      nextHistoryBrailleRequestVersion(id);
       updateHistoryItem(id, { braille_text: "" });
       restoreHistoryText(item);
     } else {
       braillePicker.disabled = true;
+      const requestVersion = nextHistoryBrailleRequestVersion(id);
       fetchBraillePreview(item.text, item.language, grade)
         .then((brailleText) => {
-          setHistoryBrailleText(item, brailleText);
+          if (canApplyHistoryBrailleResult(id, grade, requestVersion)) {
+            setHistoryBrailleText(item, brailleText);
+          }
         })
         .catch(() => {})
         .finally(() => { braillePicker.disabled = false; });
@@ -1516,12 +1594,16 @@ brailleSelect.addEventListener("change", () => {
     const item = findTranscriptInHistory(currentTranscriptId);
     if (item) {
       if (grade === "off") {
+        nextHistoryBrailleRequestVersion(currentTranscriptId);
         updateHistoryItem(currentTranscriptId, { braille_text: "" });
         restoreHistoryText(item);
       } else {
+        const requestVersion = nextHistoryBrailleRequestVersion(currentTranscriptId);
         fetchBraillePreview(item.text, item.language, grade)
           .then((brailleText) => {
-            setHistoryBrailleText(item, brailleText);
+            if (canApplyHistoryBrailleResult(currentTranscriptId, grade, requestVersion)) {
+              setHistoryBrailleText(item, brailleText);
+            }
           })
           .catch(() => {});
       }
@@ -1532,8 +1614,11 @@ brailleSelect.addEventListener("change", () => {
 let previewAnimationState = null;
 let previewDebounceTimer = null;
 let currentPreviewData = null;
+let previewSubmittedData = null;
+let previewSubmitInFlight = false;
 let cachedPaperSizes = null;
 let previewTranscriptItem = null;
+let previewRequestVersion = 0;
 
 let cachedHersheyFonts = null;
 
@@ -1564,12 +1649,14 @@ function updateRenderModeForFont() {
   }
 }
 
-function setPreviewFont(family) {
+function setPreviewFont(family, { refresh = true } = {}) {
   previewFontValue.value = family;
   const label = previewFontTrigger.querySelector(".font-trigger-label");
   if (label) label.textContent = family;
   updateRenderModeForFont();
-  debouncedRefreshPreview();
+  if (refresh) {
+    debouncedRefreshPreview();
+  }
 }
 
 async function loadPaperSizes() {
@@ -1644,6 +1731,10 @@ function getPreviewParams(item) {
 }
 
 async function fetchPreview(item) {
+  if (!item) return;
+
+  const itemId = item.id;
+  const requestVersion = ++previewRequestVersion;
   const params = getPreviewParams(item);
   previewStats.textContent = "Generating preview...";
   try {
@@ -1652,14 +1743,30 @@ async function fetchPreview(item) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),
     });
+    if (
+      requestVersion !== previewRequestVersion
+      || previewModal.hidden
+      || previewTranscriptItem?.id !== itemId
+    ) {
+      return;
+    }
     currentPreviewData = data;
     renderPreviewStats(data);
     startPreviewAnimation(data);
   } catch (err) {
+    if (
+      requestVersion !== previewRequestVersion
+      || previewModal.hidden
+      || previewTranscriptItem?.id !== itemId
+    ) {
+      return;
+    }
     previewStats.textContent = err.message || "Preview failed.";
     currentPreviewData = null;
   }
-  syncRobotControls();
+  if (requestVersion === previewRequestVersion) {
+    syncRobotControls();
+  }
 }
 
 function renderPreviewStats(data) {
@@ -1989,11 +2096,16 @@ function drawPunchPoint(ctx, state, point) {
   ctx.fill();
 }
 
-function stopPreviewAnimation() {
+function stopPreviewAnimation({ discardState = true } = {}) {
   if (previewAnimationState?.animFrameId) {
     cancelAnimationFrame(previewAnimationState.animFrameId);
+    previewAnimationState.animFrameId = null;
   }
-  previewAnimationState = null;
+  if (!previewAnimationState) return;
+  previewAnimationState.playing = false;
+  if (discardState) {
+    previewAnimationState = null;
+  }
 }
 
 function skipPreviewAnimation() {
@@ -2052,6 +2164,9 @@ function itemBrailleActive(item) {
 }
 
 function openPreviewModal(item) {
+  clearTimeout(previewDebounceTimer);
+  previewDebounceTimer = null;
+  previewRequestVersion += 1;
   previewTranscriptItem = item;
   previewModal.hidden = false;
   customPaperFields.hidden = previewPaperSize.value !== "Custom";
@@ -2071,7 +2186,7 @@ function openPreviewModal(item) {
     setElementDisplay(fontLabel, false);
   } else {
     setElementDisplay(fontLabel, true);
-    setPreviewFont(item.font_family);
+    setPreviewFont(item.font_family, { refresh: false });
     previewFontTrigger.dataset.subset = item.script || "latin";
   }
 
@@ -2092,17 +2207,24 @@ function openPreviewModal(item) {
 }
 
 function closePreviewModal() {
+  clearTimeout(previewDebounceTimer);
+  previewDebounceTimer = null;
+  previewRequestVersion += 1;
   previewModal.hidden = true;
   stopPreviewAnimation();
   currentPreviewData = null;
   previewTranscriptItem = null;
+  previewStats.textContent = "";
+  previewPlayPause.textContent = "\u25B6";
 }
 
 function debouncedRefreshPreview() {
-  if (!previewTranscriptItem) return;
+  if (!previewTranscriptItem || previewSubmitInFlight || robotJobInPreviewMode) return;
   clearTimeout(previewDebounceTimer);
   previewDebounceTimer = setTimeout(() => {
-    fetchPreview(previewTranscriptItem);
+    if (!previewSubmitInFlight && !robotJobInPreviewMode) {
+      fetchPreview(previewTranscriptItem);
+    }
   }, 300);
 }
 previewModalClose.addEventListener("click", closePreviewModal);

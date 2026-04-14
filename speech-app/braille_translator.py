@@ -1,4 +1,7 @@
-import louis
+try:
+    import louis as _LOUIS
+except ImportError:
+    _LOUIS = None
 
 
 # Grade 1: try "{lang}.tbl" first, with overrides for mismatched table names.
@@ -27,31 +30,47 @@ _G2_TABLE: dict[str, str] = {
 
 _DEFAULT_TABLE = "en_US.tbl"
 SUPPORTED_GRADES = (1, 2)
+BRAILLE_UNAVAILABLE_MESSAGE = (
+    "Braille support is unavailable because the 'louis' Python module is not installed."
+)
+BRAILLE_TABLES_UNAVAILABLE_MESSAGE = (
+    "Braille support is unavailable because compatible liblouis tables were not found."
+)
+
+
+class BrailleUnavailableError(RuntimeError):
+    pass
+
+
+def _require_louis():
+    if _LOUIS is None:
+        raise BrailleUnavailableError(BRAILLE_UNAVAILABLE_MESSAGE)
+    return _LOUIS
 
 
 def _grade1_table(language: str) -> str:
-    if language in _G1_OVERRIDES:
-        return _G1_OVERRIDES[language]
-    if _try_dynamic_table(language):
-        return f"{language}.tbl"
-    return _DEFAULT_TABLE
+    table = _resolve_grade1_table(language)
+    if table is None:
+        raise BrailleUnavailableError(BRAILLE_TABLES_UNAVAILABLE_MESSAGE)
+    return table
 
 
 def get_braille_table(language: str, grade: int) -> str:
     grade = grade if grade in SUPPORTED_GRADES else 1
-    if grade == 2 and language in _G2_TABLE:
-        return _G2_TABLE[language]
+    if grade == 2:
+        table = _resolve_grade2_table(language)
+        if table is not None:
+            return table
     return _grade1_table(language)
 
 
 def translate_to_braille_text(text: str, language: str, grade: int) -> str:
     table = get_braille_table(language, grade)
-    return louis.translateString(["unicode.dis", table], text)
+    return _require_louis().translateString(["unicode.dis", table], text)
 
 
 def translate_to_braille(text: str, language: str, grade: int) -> list[list[int]]:
-    table = get_braille_table(language, grade)
-    braille_string = louis.translateString(["unicode.dis", table], text)
+    braille_string = translate_to_braille_text(text, language, grade)
 
     cells: list[list[int]] = []
     for char in braille_string:
@@ -71,20 +90,40 @@ def translate_to_braille(text: str, language: str, grade: int) -> list[list[int]
 
 
 def available_grades(language: str) -> list[int]:
-    has_g1 = True
-    has_g2 = language in _G2_TABLE
-    grades: list[int] = []
-    if has_g1:
-        grades.append(1)
-    if has_g2:
+    grade1_table = _resolve_grade1_table(language)
+    if grade1_table is None:
+        return []
+    grades = [1]
+    if _resolve_grade2_table(language) is not None:
         grades.append(2)
     return grades
 
 
-def _try_dynamic_table(language: str) -> bool:
-    table = f"{language}.tbl"
+def _resolve_grade1_table(language: str) -> str | None:
+    candidates = []
+    if language in _G1_OVERRIDES:
+        candidates.append(_G1_OVERRIDES[language])
+    candidates.append(f"{language}.tbl")
+    candidates.append(_DEFAULT_TABLE)
+
+    for table in candidates:
+        if _table_exists(table):
+            return table
+    return None
+
+
+def _resolve_grade2_table(language: str) -> str | None:
+    table = _G2_TABLE.get(language)
+    if table and _table_exists(table):
+        return table
+    return None
+
+
+def _table_exists(table: str) -> bool:
+    if _LOUIS is None:
+        return False
     try:
-        louis.checkTable([table])
+        _LOUIS.checkTable([table])
         return True
     except RuntimeError:
         return False

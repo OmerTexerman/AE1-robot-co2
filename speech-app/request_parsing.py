@@ -99,7 +99,9 @@ def parse_toolpath_mode(value: object) -> str:
 
 def parse_render_mode(value: object) -> str:
     render_mode = parse_string(value, "Render mode", default="outline").lower()
-    return render_mode if render_mode in VALID_RENDER_MODES else "outline"
+    if render_mode not in VALID_RENDER_MODES:
+        raise ValueError("Render mode must be 'outline', 'filled', or 'centerline'.")
+    return render_mode
 
 
 def parse_numeric_mapping(

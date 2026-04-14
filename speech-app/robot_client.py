@@ -554,9 +554,6 @@ def active_hello_probe(candidate_ports: list[int] | None = None) -> list[dict]:
             if robot is None:
                 continue
             discovered[_robot_key(robot)] = robot
-            for pending in futures:
-                pending.cancel()
-            break
 
     return list(discovered.values())
 
@@ -567,52 +564,61 @@ def _list_pico_ports() -> list:
     return [p for p in serial.tools.list_ports.comports() if p.vid == PICO_USB_VID]
 
 
-def _pick_data_port(pico_ports: list) -> str | None:
+def _pick_data_ports(pico_ports: list) -> list[str]:
     if not pico_ports:
-        return None
+        return []
 
     by_serial: dict[str, list] = {}
     for p in pico_ports:
         key = p.serial_number or p.device
         by_serial.setdefault(key, []).append(p)
 
-    # Prefer the non-REPL CDC port when dual CDC is enabled.
+    selected_ports: list[str] = []
     for ports in by_serial.values():
-        if len(ports) < 2:
-            continue
-
+        chosen_port = None
         for p in ports:
             if getattr(p, "interface", None) != "Board CDC":
-                return p.device
+                chosen_port = p.device
+                break
+        if chosen_port is None and ports:
+            chosen_port = ports[0].device
+        if chosen_port is not None:
+            selected_ports.append(chosen_port)
 
-    return None
+    return selected_ports
 
 
 def discover_usb_robots() -> list[dict]:
     pico_ports = _list_pico_ports()
-    data_port = _pick_data_port(pico_ports)
-    if data_port is None:
+    data_ports = _pick_data_ports(pico_ports)
+    if not data_ports:
         return []
 
-    config = {"transport": TRANSPORT_SERIAL, "serial_port": data_port}
-    try:
-        transport = get_transport(config)
-        hello = transport.request("GET", "/hello")
-    except RobotClientError:
-        return []
-    finally:
-        close_transport(config)
+    discovered: dict[str, dict] = {}
 
-    return [{
-        "host": data_port,
-        "port": 0,
-        "device_name": hello.get("device_name", DEFAULT_DEVICE_NAME),
-        "device_id": hello.get("device_id", DEFAULT_DEVICE_ID),
-        "paired": bool(hello.get("paired")),
-        "serial_framing": bool(hello.get("serial_framing")),
-        "usb": True,
-        "serial_port": data_port,
-    }]
+    for data_port in data_ports:
+        config = {"transport": TRANSPORT_SERIAL, "serial_port": data_port}
+        try:
+            transport = get_transport(config)
+            hello = transport.request("GET", "/hello")
+        except RobotClientError:
+            continue
+        finally:
+            close_transport(config)
+
+        robot = {
+            "host": data_port,
+            "port": 0,
+            "device_name": hello.get("device_name", DEFAULT_DEVICE_NAME),
+            "device_id": hello.get("device_id", DEFAULT_DEVICE_ID),
+            "paired": bool(hello.get("paired")),
+            "serial_framing": bool(hello.get("serial_framing")),
+            "usb": True,
+            "serial_port": data_port,
+        }
+        discovered[robot["device_id"]] = robot
+
+    return list(discovered.values())
 
 
 def serial_port_exists(port: str) -> bool:

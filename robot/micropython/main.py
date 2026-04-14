@@ -178,6 +178,8 @@ def parse_request(client):
             payload = ujson.loads(body.decode())
         except ValueError:
             raise ValueError("invalid json body")
+        if not isinstance(payload, dict):
+            raise ValueError("json body must be an object")
 
     qs = ""
     if "?" in path:
@@ -241,8 +243,7 @@ def _set_pending_job(action, payload, kind):
     js["op_index"] = 0
     js["total_ops"] = 0
     js["error"] = None
-    if "result" in js:
-        js["result"] = None
+    js["result"] = None
 
     _pending_job = {"kind": kind, "job_id": job_id, "payload": payload}
     return job_id, None
@@ -271,22 +272,50 @@ def _validate_render_payload(payload):
     for i, op in enumerate(operations):
         if not isinstance(op, dict):
             return None, "operation {} is not an object".format(i)
-        op_type = op.get("type", "draw")
-        if op_type in ("draw", "travel"):
+        op_type = op.get("type")
+        if op_type == "draw":
             pts = op.get("points")
             if not isinstance(pts, list) or len(pts) < 2:
-                return None, "operation {} ({}): needs at least 2 points".format(i, op_type)
+                return None, "operation {} (draw): needs at least 2 points".format(i)
             if len(pts) > MAX_POINTS_PER_OP:
                 return None, "operation {}: too many points ({} > {})".format(
                     i, len(pts), MAX_POINTS_PER_OP)
+            for j, pt in enumerate(pts):
+                err = _validate_render_point(pt, "operation {} point {}".format(i, j))
+                if err:
+                    return None, err
+        elif op_type == "travel":
+            pts = op.get("points")
+            if not isinstance(pts, list) or len(pts) < 1:
+                return None, "operation {} (travel): needs at least 1 point".format(i)
+            if len(pts) > MAX_POINTS_PER_OP:
+                return None, "operation {}: too many points ({} > {})".format(
+                    i, len(pts), MAX_POINTS_PER_OP)
+            for j, pt in enumerate(pts):
+                err = _validate_render_point(pt, "operation {} point {}".format(i, j))
+                if err:
+                    return None, err
         elif op_type == "punch":
             pt = op.get("point")
-            if not isinstance(pt, list) or len(pt) < 2:
-                return None, "operation {} (punch): missing point".format(i)
+            err = _validate_render_point(pt, "operation {} point".format(i))
+            if err:
+                return None, err
         else:
             return None, "operation {}: unknown type {}".format(i, op_type)
 
     return operations, None
+
+
+def _validate_render_point(point, label):
+    if not isinstance(point, list) or len(point) != 2:
+        return "{} must contain exactly 2 coordinates".format(label)
+    if _render_coord_invalid(point[0]) or _render_coord_invalid(point[1]):
+        return "{} coordinates must be numbers".format(label)
+    return None
+
+
+def _render_coord_invalid(value):
+    return isinstance(value, bool) or not isinstance(value, (int, float))
 
 
 def dispatch_request(method, path, qs, headers, payload, ip_address, skip_auth=False):
@@ -575,12 +604,28 @@ def handle_serial_command(cdc, message, ip_address, framed=False):
     except ValueError:
         serial_write_response(cdc, {"status": 400, "body": {"error": "Invalid JSON"}}, framed=framed)
         return
+    if not isinstance(cmd, dict):
+        serial_write_response(cdc, {"status": 400, "body": {"error": "JSON command must be an object"}}, framed=framed)
+        return
 
-    method = cmd.get("method", "GET").upper()
+    raw_method = cmd.get("method", "GET")
     raw_path = cmd.get("path", "/")
     headers = cmd.get("headers", {})
     payload = cmd.get("body", {})
+    if not isinstance(raw_method, str):
+        serial_write_response(cdc, {"status": 400, "body": {"error": "method must be a string"}}, framed=framed)
+        return
+    if not isinstance(raw_path, str):
+        serial_write_response(cdc, {"status": 400, "body": {"error": "path must be a string"}}, framed=framed)
+        return
+    if not isinstance(headers, dict):
+        serial_write_response(cdc, {"status": 400, "body": {"error": "headers must be an object"}}, framed=framed)
+        return
+    if not isinstance(payload, dict):
+        serial_write_response(cdc, {"status": 400, "body": {"error": "body must be an object"}}, framed=framed)
+        return
 
+    method = raw_method.upper()
     qs = ""
     path = raw_path
     if "?" in raw_path:
@@ -769,6 +814,13 @@ def _run_pending_job():
     js["status"] = STATUS_RUNNING
     js["kind"] = kind
     js["job_id"] = job_id
+    js["error"] = None
+    js["result"] = None
+    if _motion._abort_requested:
+        js["status"] = STATUS_ABORTED
+        _motion._abort_requested = False
+        log("job aborted before start kind={} job_id={}".format(kind, job_id))
+        return True
     _motion._abort_requested = False
 
     try:
@@ -804,7 +856,9 @@ def _run_pending_job():
             log("home before render job_id={}".format(job_id))
             _motion.home()
             _motion.execute_operations(payload["operations"], job_id=job_id)
+            js["status"] = STATUS_RUNNING
             _motion.home()
+            js["status"] = STATUS_COMPLETE
             log("render complete job_id={}".format(job_id))
 
         else:
@@ -819,6 +873,14 @@ def _run_pending_job():
                 js["status"] = STATUS_FAILED
                 js["error"] = str(exc)
         log("job failed kind={} error={}".format(kind, exc))
+    except Exception as exc:
+        js["status"] = STATUS_FAILED
+        js["error"] = "internal error"
+        log("job crashed kind={} error={}".format(kind, exc))
+        try:
+            _motion.pen.up()
+        except Exception:
+            pass
 
     return True
 

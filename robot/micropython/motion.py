@@ -1,24 +1,4 @@
-"""CoreXY motion controller for the AE1 robot.
-
-Responsibilities:
-  - Homing to top-left corner via X_MIN and Y_MIN switches.
-  - Logical (x, y) mm motion via CoreXY kinematics + Bresenham step interleaving.
-  - Soft-limit safety using calibrated work area from pins.py.
-  - Cooperative yield callback every N pulses so the HTTP/serial server
-    can stay responsive during long jobs.
-  - Job state tracking (idle / running / complete / failed / aborted)
-    exposed via .get_status() for the /job endpoint to read.
-  - Pen abstraction calls (currently no-ops; pen.py is a stub) at the
-    correct points so the servo wiring is a one-file change later.
-
-Kinematics — empirically verified during bring-up (2026-04-09):
-  Both motors spinning forward (A+ B+) → carriage moves -X (left).
-  A+ B-                                → carriage moves -Y (up).
-  Inverting and solving:
-      sA = -(dx + dy)         # signed motor-A step count
-      sB =  dy - dx           # signed motor-B step count
-  Where positive sA/sB means forward (DIR pin = 1).
-"""
+"""CoreXY motion controller for the AE1 robot."""
 
 from machine import Pin
 import time
@@ -43,7 +23,6 @@ class Motion:
     """Owns the steppers, switches, and pen. Single instance per process."""
 
     def __init__(self, on_yield=None, pen=None):
-        # Yield from long moves so the server can keep servicing requests.
         self._on_yield = on_yield
         self._yield_interval = 50
 
@@ -63,8 +42,6 @@ class Motion:
         self.homed = False
         self.calibrated = False
 
-        # Calibration data — loaded from flash or populated by calibrate_sweep().
-        # None until the first successful calibration.
         self.travel_x_mm = None
         self.travel_y_mm = None
         self.work_area_x_mm = None
@@ -73,10 +50,12 @@ class Motion:
 
         self._job_state = {
             "status":   STATUS_IDLE,
+            "kind":     None,
             "job_id":   None,
             "op_index": 0,
             "total_ops": 0,
             "error":    None,
+            "result":   None,
         }
         self._abort_requested = False
 
@@ -119,6 +98,7 @@ class Motion:
         progress_pct = round(100.0 * op_idx / total, 1) if total else 0.0
         status = {
             "status":       self._job_state["status"],
+            "kind":         self._job_state["kind"],
             "job_id":       self._job_state["job_id"],
             "op_index":     op_idx,
             "total_ops":    total,
@@ -130,6 +110,8 @@ class Motion:
             "switches":     self.switch_state(),
             "error":        self._job_state["error"],
         }
+        if self._job_state["result"] is not None:
+            status["result"] = self._job_state["result"]
         if self.calibrated:
             status["work_area_mm"] = [self.work_area_x_mm, self.work_area_y_mm]
         return status
@@ -145,10 +127,12 @@ class Motion:
 
     def reset_job_state(self):
         self._job_state["status"]   = STATUS_IDLE
+        self._job_state["kind"]     = None
         self._job_state["job_id"]   = None
         self._job_state["op_index"] = 0
         self._job_state["total_ops"] = 0
         self._job_state["error"]    = None
+        self._job_state["result"]   = None
         self._abort_requested = False
 
     def _yield(self):
@@ -220,32 +204,24 @@ class Motion:
 
         backoff_steps = int(pins.HOME_BACKOFF_MM * pins.STEPS_PER_MM)
 
-        # -Y (up) toward Y_MIN: A+ B-
         result, _ = self._move_until_switch(1, 0, self._sw_y_min, abort_other_switches=False)
         if result != "hit":
             raise MotionError("Y homing failed: " + result)
-        # +Y backoff (A- B+) — raw open loop, ignores the still-pressed switch
         self._move_open_loop(0, 1, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)
 
-        # -X (left) toward X_MIN: A+ B+
         result, _ = self._move_until_switch(1, 1, self._sw_x_min, abort_other_switches=False)
         if result != "hit":
             raise MotionError("X homing failed: " + result)
-        # +X backoff (A- B-)
         self._move_open_loop(0, 0, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)
 
         self.position_steps = [0, 0]
         self.homed = True
 
     def move_by_steps(self, dx_steps, dy_steps, half_us=None):
-        """CoreXY + Bresenham move by (dx, dy) microsteps from current position.
-        Aborts on any limit switch contact or on a request_abort() call.
-        On any abort, marks the position as no longer homed (must re-home).
-        On clean completion, updates position_steps and returns the pulse count."""
+        """Move by signed step deltas and update the tracked position."""
         if half_us is None:
             half_us = pins.DEFAULT_HALF_PERIOD_US
 
-        # CoreXY forward kinematics (sign convention verified empirically)
         sA = -(dx_steps + dy_steps)
         sB = dy_steps - dx_steps
         if sA == 0 and sB == 0:
@@ -260,7 +236,6 @@ class Motion:
         nB = abs(sB)
         n = nA if nA >= nB else nB
 
-        # Bresenham-style interleaving keeps the slower axis evenly distributed.
         errA = n // 2
         errB = n // 2
         yi = self._yield_interval
@@ -300,15 +275,13 @@ class Motion:
         return n
 
     def move_by_mm(self, dx_mm, dy_mm, half_us=None):
-        """Relative mm move. For absolute targets prefer move_to_mm() — it
-        avoids cumulative rounding error across many small moves."""
+        """Move by relative millimeter deltas."""
         dx_steps = int(round(dx_mm * pins.STEPS_PER_MM))
         dy_steps = int(round(dy_mm * pins.STEPS_PER_MM))
         return self.move_by_steps(dx_steps, dy_steps, half_us)
 
     def move_to_mm(self, x_mm, y_mm, half_us=None):
-        """Absolute move. Step delta is computed from absolute target so
-        repeated small moves don't accumulate rounding error."""
+        """Move to an absolute millimeter position."""
         if not self.homed:
             raise MotionError("Cannot move_to: robot is not homed")
         if not self.calibrated:
@@ -332,30 +305,47 @@ class Motion:
     def _draw_half_us(self, half_us):
         return pins.DRAW_HALF_PERIOD_US if half_us is None else half_us
 
+    def _validated_point(self, point, label):
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise MotionError("{} must contain exactly 2 coordinates".format(label))
+        x_mm, y_mm = point[0], point[1]
+        if isinstance(x_mm, bool) or not isinstance(x_mm, (int, float)):
+            raise MotionError("{} x coordinate must be numeric".format(label))
+        if isinstance(y_mm, bool) or not isinstance(y_mm, (int, float)):
+            raise MotionError("{} y coordinate must be numeric".format(label))
+        return x_mm, y_mm
+
+    def _validate_operation(self, op):
+        op_type = op.get("type")
+        if op_type == "draw":
+            points = op.get("points")
+            if not isinstance(points, list) or len(points) < 2:
+                raise MotionError("draw operation needs at least 2 points")
+            for index, point in enumerate(points):
+                x_mm, y_mm = self._validated_point(point, "draw point {}".format(index))
+                self._check_bounds(x_mm, y_mm)
+        elif op_type == "travel":
+            points = op.get("points")
+            if not isinstance(points, list) or not points:
+                raise MotionError("travel operation needs at least 1 point")
+            for index, point in enumerate(points):
+                x_mm, y_mm = self._validated_point(point, "travel point {}".format(index))
+                self._check_bounds(x_mm, y_mm)
+        elif op_type == "punch":
+            x_mm, y_mm = self._validated_point(op.get("point"), "punch point")
+            self._check_bounds(x_mm, y_mm)
+        else:
+            raise MotionError("unknown operation type: {}".format(op_type))
+
     def execute_operations(self, operations, job_id=None, half_us=None):
-        """Execute a toolpath produced by speech-app/toolpath.py.
-
-        Each operation is a dict with one of these shapes:
-            {"type": "draw",   "points": [[x, y], ...]}   -> pen down trace
-            {"type": "travel", "points": [[x, y], ...]}   -> pen up move
-            {"type": "punch",  "point":  [x, y]}          -> braille dot
-
-        Coordinates are in absolute machine mm (origin = home = top-left).
-        Validates all coordinates against the work area before any motion.
-        Raises MotionError on any failure; updates job_state throughout.
-        """
+        """Execute a validated toolpath."""
         if not self.homed:
             raise MotionError("Cannot execute: robot is not homed")
         if not self.calibrated:
             raise MotionError("Cannot execute: robot is not calibrated")
 
-        # Pre-validate so we don't half-draw and then fault.
         for op in operations:
-            for pt in op.get("points", []) or []:
-                self._check_bounds(pt[0], pt[1])
-            pt = op.get("point")
-            if pt is not None:
-                self._check_bounds(pt[0], pt[1])
+            self._validate_operation(op)
 
         self._job_state["status"]    = STATUS_RUNNING
         self._job_state["job_id"]    = job_id
@@ -366,7 +356,7 @@ class Motion:
 
         try:
             for i, op in enumerate(operations):
-                op_type = op.get("type", "draw")
+                op_type = op.get("type")
 
                 if op_type == "draw":
                     self._execute_draw(op, half_us)
@@ -374,20 +364,17 @@ class Motion:
                     self._execute_travel(op, half_us)
                 elif op_type == "punch":
                     self._execute_punch(op, half_us)
-                else:
-                    raise MotionError("unknown operation type: {}".format(op_type))
                 self._job_state["op_index"] = i + 1
 
+            self.pen.up()
             self._job_state["op_index"] = len(operations)
             self._job_state["status"] = STATUS_COMPLETE
-            self.pen.up()
         except MotionError as exc:
             if self._abort_requested:
                 self._job_state["status"] = STATUS_ABORTED
             else:
                 self._job_state["status"] = STATUS_FAILED
                 self._job_state["error"] = str(exc)
-            # Always lift the pen on failure — physical safety once mounted.
             try:
                 self.pen.up()
             except Exception:
@@ -434,27 +421,22 @@ class Motion:
                 round(x_mm, 2), round(y_mm, 2), round(self.work_area_y_mm, 2)))
 
     def calibrate_sweep(self):
-        """Home, then drive to the far rails counting steps. Returns the
-        measured travel in microsteps and mm. Updates `homed` to True at the
-        end (re-homes). Useful as a diagnostic to verify steps_per_mm and
-        detect mechanical wear / belt slip / step loss."""
+        """Measure full X/Y travel and persist the resulting work area."""
         self.pen.up()
         self.home()
         self.homed = False
         backoff_steps = int(pins.HOME_BACKOFF_MM * pins.STEPS_PER_MM)
         try:
             self.pen.up()
-            # +Y (down): A- B+
             r, travel_y = self._move_until_switch(0, 1, self._sw_y_max, abort_other_switches=False)
             if r != "hit":
                 raise MotionError("Y calibration failed: " + r)
-            self._move_open_loop(1, 0, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)   # -Y backoff (A+ B-)
+            self._move_open_loop(1, 0, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)
 
-            # +X (right): A- B-
             r, travel_x = self._move_until_switch(0, 0, self._sw_x_max, abort_other_switches=False)
             if r != "hit":
                 raise MotionError("X calibration failed: " + r)
-            self._move_open_loop(1, 1, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)   # -X backoff (A+ B+)
+            self._move_open_loop(1, 1, backoff_steps, half_us=pins.HOMING_HALF_PERIOD_US)
 
             self.home()
 
@@ -463,9 +445,10 @@ class Motion:
             travel_x_mm = full_x_steps / pins.STEPS_PER_MM
             travel_y_mm = full_y_steps / pins.STEPS_PER_MM
 
-            # Persist to flash and update live state so the work area is
-            # immediately available without a reboot.
-            self._save_calibration(travel_x_mm, travel_y_mm)
+            try:
+                self._save_calibration(travel_x_mm, travel_y_mm)
+            except OSError as exc:
+                raise MotionError("calibration save failed: {}".format(exc))
             self._apply_calibration(travel_x_mm, travel_y_mm)
 
             return {

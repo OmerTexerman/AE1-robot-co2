@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import requests
 import uharfbuzz as hb
-from fontTools.pens.recordingPen import RecordingPen
+from fontTools.pens.basePen import BasePen
 from fontTools.ttLib import TTFont
 from scipy.spatial import Voronoi
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
@@ -62,23 +62,6 @@ def get_ttf_path(font_family: str) -> Path:
     return cached
 
 
-def _flatten_quadratic(points, tolerance):
-    """Flatten a quadratic B-spline segment to line segments."""
-    if len(points) < 3:
-        return list(points)
-
-    result = [points[0]]
-    for i in range(1, len(points) - 1, 2):
-        if i + 1 >= len(points):
-            result.append(points[i])
-            break
-        p0 = result[-1]
-        p1 = points[i]
-        p2 = points[i + 1]
-        _subdivide_quadratic(p0, p1, p2, tolerance, result)
-    return result
-
-
 def _subdivide_quadratic(p0, p1, p2, tolerance, result):
     """Recursively subdivide a quadratic bezier until flat enough."""
     mid_x = (p0[0] + 2 * p1[0] + p2[0]) / 4
@@ -123,48 +106,42 @@ def _subdivide_cubic(p0, p1, p2, p3, tolerance, result):
         _subdivide_cubic(mid, m123, m23, p3, tolerance, result)
 
 
-def _recording_pen_to_paths(rec, tolerance):
-    """Convert a RecordingPen's recorded operations to polyline paths."""
-    paths = []
-    current_path = []
-    current_pt = (0, 0)
+class _FlatteningPathPen(BasePen):
+    def __init__(self, glyph_set, tolerance):
+        super().__init__(glyph_set)
+        self.tolerance = tolerance
+        self.paths = []
+        self._current_path = []
 
-    for op, args in rec.value:
-        if op == "moveTo":
-            if len(current_path) > 1:
-                paths.append(current_path)
-            current_pt = args[0]
-            current_path = [current_pt]
+    def _moveTo(self, pt):
+        if len(self._current_path) > 1:
+            self.paths.append(self._current_path)
+        self._current_path = [pt]
 
-        elif op == "lineTo":
-            current_pt = args[0]
-            current_path.append(current_pt)
+    def _lineTo(self, pt):
+        self._current_path.append(pt)
 
-        elif op == "qCurveTo":
-            pts = [current_pt] + list(args)
-            flat = _flatten_quadratic(pts, tolerance)
-            current_path.extend(flat[1:])
-            current_pt = flat[-1]
+    def _qCurveToOne(self, p1, p2):
+        result = [self._current_path[-1]]
+        _subdivide_quadratic(result[0], p1, p2, self.tolerance, result)
+        self._current_path.extend(result[1:])
 
-        elif op == "curveTo":
-            # Cubic bezier: args = (p1, p2, p3) where current_pt is p0
-            pts = list(args)
-            result = []
-            _subdivide_cubic(current_pt, pts[0], pts[1], pts[2], tolerance, result)
-            current_path.extend(result)
-            current_pt = result[-1] if result else current_pt
+    def _curveToOne(self, p1, p2, p3):
+        result = [self._current_path[-1]]
+        _subdivide_cubic(result[0], p1, p2, p3, self.tolerance, result)
+        self._current_path.extend(result[1:])
 
-        elif op == "closePath" or op == "endPath":
-            if len(current_path) > 1:
-                if op == "closePath" and current_path[0] != current_path[-1]:
-                    current_path.append(current_path[0])
-                paths.append(current_path)
-            current_path = []
+    def _closePath(self):
+        if len(self._current_path) > 1:
+            if self._current_path[0] != self._current_path[-1]:
+                self._current_path.append(self._current_path[0])
+            self.paths.append(self._current_path)
+        self._current_path = []
 
-    if len(current_path) > 1:
-        paths.append(current_path)
-
-    return paths
+    def _endPath(self):
+        if len(self._current_path) > 1:
+            self.paths.append(self._current_path)
+        self._current_path = []
 
 
 def _shape_text(ttf_path, text):
@@ -233,9 +210,9 @@ def get_glyph_outlines(ttf_path, text, font_size_mm):
 
         paths = []
         if glyph_name and glyph_name in glyphset:
-            pen = RecordingPen()
+            pen = _FlatteningPathPen(glyphset, CURVE_TOLERANCE)
             glyphset[glyph_name].draw(pen)
-            raw_paths = _recording_pen_to_paths(pen, CURVE_TOLERANCE)
+            raw_paths = pen.paths
 
             for raw_path in raw_paths:
                 scaled = []
@@ -469,7 +446,7 @@ def centerline_from_outline(outline_paths):
         # this far from the boundary. This filters out the noisy edges that
         # hug the outline. Use a fraction of the estimated stroke width.
         min_dist = estimated_stroke_width * 0.2
-        boundary_line = poly.exterior
+        boundary_line = poly.boundary
 
         # Pre-compute vertex distances from boundary
         vertex_dists = {}
@@ -548,9 +525,11 @@ def get_glyph_centerlines(ttf_path, text, font_size_mm):
     for glyph in glyphs:
         if glyph.paths:
             centerlines = centerline_from_outline(glyph.paths)
-            if centerlines:
-                glyph.paths = centerlines
-            # If centerline extraction fails, keep the outlines as fallback
+            if not centerlines:
+                raise ValueError(
+                    "Centerline rendering failed for {!r} in this font.".format(glyph.char or text)
+                )
+            glyph.paths = centerlines
 
     return glyphs
 
