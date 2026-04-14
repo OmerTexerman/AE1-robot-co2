@@ -4,13 +4,14 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 from braille_translator import available_grades, normalize_grade, translate_to_braille_text
 from font_selector import choose_font
-from google_fonts import DEFAULT_FONT_FAMILY, get_fonts_for_subset, warm_cache
+from google_fonts import get_fonts_for_subset, warm_cache
 from paper_sizes import (
     DEFAULT_FONT_SIZE_MM,
     DEFAULT_MARGINS,
@@ -18,13 +19,11 @@ from paper_sizes import (
     GANTRY_HEIGHT_MM,
     GANTRY_WIDTH_MM,
     PAPER_OFFSET,
-    get_paper_size,
     list_paper_sizes,
 )
 from font_renderer import list_hershey_fonts
 from toolpath import generate_braille_toolpath, generate_write_toolpath
 from robot_client import (
-    DEFAULT_PORT,
     TRANSPORT_SERIAL,
     RobotClientError,
     close_transport,
@@ -51,6 +50,18 @@ from robot_service import (
     unpaired_robot_payload,
     unpair_current_robot,
 )
+from request_parsing import (
+    DEFAULT_CLIENT_NAME,
+    parse_float,
+    parse_int,
+    parse_optional_int,
+    parse_pairing_request,
+    parse_port,
+    parse_string,
+    parse_toolpath_mode,
+    parse_toolpath_request,
+    validate_operations,
+)
 from transcription import normalize_provider, transcribe_audio
 
 load_dotenv()
@@ -75,37 +86,8 @@ def request_payload() -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def parse_port(value: object, error_message: str, default: int = DEFAULT_PORT) -> int:
-    if value in (None, ""):
-        return default
-
-    try:
-        port = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error_message) from exc
-
-    if not 1 <= port <= 65535:
-        raise ValueError(error_message)
-
-    return port
-
-
 def parse_discovery_port(payload: dict) -> int:
     return parse_port(payload.get("port"), "Robot discovery port must be a number.")
-
-
-def parse_pairing_request(payload: dict) -> tuple[str, int, str, str]:
-    host = str(payload.get("host", "")).strip()
-    pairing_code = str(payload.get("pairing_code", "")).strip()
-    client_name = str(payload.get("client_name", "speech-app")).strip() or "speech-app"
-    port = parse_port(payload.get("port"), "Robot port must be a number.")
-
-    if not host:
-        raise ValueError("Robot host or IP is required.")
-    if not pairing_code:
-        raise ValueError("Pairing code is required.")
-
-    return host, port, pairing_code, client_name
 
 
 def save_uploaded_audio(audio) -> Path:
@@ -134,17 +116,43 @@ def build_transcription_response(
     }
 
 
+def build_toolpath_from_payload(payload: dict[str, Any]) -> dict:
+    request_data = parse_toolpath_request(payload)
+    common_kwargs = {
+        "paper_size": request_data["paper_size"],
+        "margins": request_data["margins"],
+        "paper_offset": request_data["paper_offset"],
+    }
+
+    if request_data["mode"] == "braille":
+        return generate_braille_toolpath(
+            request_data["text"],
+            language=request_data["language"],
+            grade=request_data["grade"],
+            **common_kwargs,
+        )
+
+    return generate_write_toolpath(
+        request_data["text"],
+        request_data["font_family"],
+        font_size_mm=request_data["font_size_mm"],
+        pen_tip_mm=request_data["pen_tip_mm"],
+        render_mode=request_data["render_mode"],
+        **common_kwargs,
+    )
+
+
 
 
 @app.post("/braille/preview")
 def braille_preview():
     payload = request_payload()
-    text = str(payload.get("text", "")).strip()
-    language = str(payload.get("language", "")).strip() or "en"
+    try:
+        text = parse_string(payload.get("text"), "Text", required=True)
+        language = parse_string(payload.get("language"), "Language", default="en")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     grade = normalize_grade(payload.get("grade"))
-
-    if not text:
-        return jsonify({"error": "Text is required."}), 400
 
     braille_text = translate_to_braille_text(text, language, grade)
     return jsonify({"braille_text": braille_text})
@@ -207,10 +215,11 @@ def robot_pair():
     payload = request_payload()
 
     if payload.get("transport") == TRANSPORT_SERIAL:
-        serial_port = str(payload.get("serial_port", "")).strip()
-        client_name = str(payload.get("client_name", "speech-app")).strip() or "speech-app"
-        if not serial_port:
-            return jsonify({"error": "Serial port is required for USB pairing."}), 400
+        try:
+            serial_port = parse_string(payload.get("serial_port"), "Serial port", required=True)
+            client_name = parse_string(payload.get("client_name"), "Client name", default=DEFAULT_CLIENT_NAME)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
         app.logger.info("robot_pair_usb requested serial_port=%s client_name=%s", serial_port, client_name)
         try:
@@ -273,54 +282,6 @@ def robot_unpair():
     return jsonify(unpaired_robot_payload(remote_error))
 
 
-def _build_toolpath_from_request(payload: dict) -> dict:
-    """Run the speech-app toolpath pipeline against a /robot/render payload
-    and return the operations + metadata. Mirrors /toolpath/preview's input
-    format so the UI can use the same params for both preview and send."""
-    text = str(payload.get("text", "")).strip()
-    if not text:
-        raise ValueError("Text is required.")
-
-    mode = str(payload.get("mode", "write")).strip()
-
-    paper_name = str(payload.get("paper_size", "A4")).strip()
-    paper = get_paper_size(paper_name)
-    if not paper:
-        custom_w = payload.get("paper_width")
-        custom_h = payload.get("paper_height")
-        if custom_w and custom_h:
-            try:
-                paper = (float(custom_w), float(custom_h))
-            except (TypeError, ValueError):
-                raise ValueError("Invalid custom paper dimensions.")
-        else:
-            paper = get_paper_size("A4")
-
-    margins = payload.get("margins", DEFAULT_MARGINS)
-    paper_offset = payload.get("paper_offset", PAPER_OFFSET)
-
-    if mode == "braille":
-        language = str(payload.get("language", "en")).strip() or "en"
-        grade = normalize_grade(payload.get("grade", 1))
-        return generate_braille_toolpath(
-            text, language=language, grade=grade,
-            paper_size=paper, margins=margins, paper_offset=paper_offset,
-        )
-
-    font_family = str(payload.get("font_family", "")).strip() or DEFAULT_FONT_FAMILY
-    font_size_mm = float(payload.get("font_size_mm", DEFAULT_FONT_SIZE_MM))
-    pen_tip_mm = float(payload.get("pen_tip_mm", DEFAULT_PEN_TIP_MM))
-    render_mode = str(payload.get("render_mode", "outline")).strip()
-    if render_mode not in ("outline", "filled", "centerline"):
-        render_mode = "outline"
-
-    return generate_write_toolpath(
-        text, font_family, font_size_mm=font_size_mm,
-        paper_size=paper, margins=margins, pen_tip_mm=pen_tip_mm,
-        render_mode=render_mode, paper_offset=paper_offset,
-    )
-
-
 @app.post("/robot/render")
 def robot_render():
     config = get_current_robot(app)
@@ -331,11 +292,11 @@ def robot_render():
 
     # Accept either preview-generated operations or legacy toolpath params.
     operations = payload.get("operations")
-    mode = str(payload.get("mode", "write")).strip() or "write"
+    mode = payload.get("mode", "write")
 
     if operations is None:
         try:
-            toolpath = _build_toolpath_from_request(payload)
+            toolpath = build_toolpath_from_payload(payload)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
@@ -344,8 +305,11 @@ def robot_render():
         operations = toolpath.get("operations", [])
         mode = toolpath.get("mode", mode)
 
-    if not isinstance(operations, list) or len(operations) == 0:
-        return jsonify({"error": "No operations to send."}), 400
+    try:
+        mode = parse_toolpath_mode(mode)
+        validate_operations(operations)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     app.logger.info(
         "robot_render device=%s host=%s port=%s ops=%s mode=%s",
@@ -410,9 +374,9 @@ def robot_jog():
         return err
     payload = request_payload()
     try:
-        dx = float(payload.get("dx", 0))
-        dy = float(payload.get("dy", 0))
-    except (TypeError, ValueError):
+        dx = parse_float(payload.get("dx", 0), "dx and dy must be numbers.", default=0)
+        dy = parse_float(payload.get("dy", 0), "dx and dy must be numbers.", default=0)
+    except ValueError:
         return jsonify({"error": "dx and dy must be numbers."}), 400
     try:
         result = send_jog_command(config, dx, dy)
@@ -429,9 +393,9 @@ def robot_move():
         return err
     payload = request_payload()
     try:
-        x = float(payload.get("x"))
-        y = float(payload.get("y"))
-    except (TypeError, ValueError):
+        x = parse_float(payload.get("x"), "x and y must be numbers.")
+        y = parse_float(payload.get("y"), "x and y must be numbers.")
+    except ValueError:
         return jsonify({"error": "x and y must be numbers."}), 400
     try:
         result = send_move_command(config, x, y)
@@ -472,8 +436,8 @@ def robot_pen_set():
         return err
     payload = request_payload()
     try:
-        duty = int(payload.get("duty", 0))
-    except (TypeError, ValueError):
+        duty = parse_int(payload.get("duty", 0), "duty must be a number", default=0)
+    except ValueError:
         return jsonify({"error": "duty must be a number"}), 400
     try:
         return jsonify(send_pen_set(config, duty))
@@ -487,17 +451,11 @@ def robot_pen_save():
     if err:
         return err
     payload = request_payload()
-    up = payload.get("pen_up_duty")
-    down = payload.get("pen_down_duty")
-    punch = payload.get("punch_duty")
     try:
-        if up is not None:
-            up = int(up)
-        if down is not None:
-            down = int(down)
-        if punch is not None:
-            punch = int(punch)
-    except (TypeError, ValueError):
+        up = parse_optional_int(payload.get("pen_up_duty"), "duty values must be numbers")
+        down = parse_optional_int(payload.get("pen_down_duty"), "duty values must be numbers")
+        punch = parse_optional_int(payload.get("punch_duty"), "duty values must be numbers")
+    except ValueError:
         return jsonify({"error": "duty values must be numbers"}), 400
     try:
         return jsonify(send_pen_save(config, pen_up_duty=up, pen_down_duty=down, punch_duty=punch))
@@ -539,49 +497,10 @@ def hershey_fonts():
 @app.post("/toolpath/preview")
 def toolpath_preview():
     payload = request_payload()
-    text = str(payload.get("text", "")).strip()
-    if not text:
-        return jsonify({"error": "Text is required."}), 400
-
-    mode = str(payload.get("mode", "write")).strip()
-
-    paper_name = str(payload.get("paper_size", "A4")).strip()
-    paper = get_paper_size(paper_name)
-    if not paper:
-        custom_w = payload.get("paper_width")
-        custom_h = payload.get("paper_height")
-        if custom_w and custom_h:
-            try:
-                paper = (float(custom_w), float(custom_h))
-            except (TypeError, ValueError):
-                return jsonify({"error": "Invalid custom paper dimensions."}), 400
-        else:
-            paper = get_paper_size("A4")
-
-    margins = payload.get("margins", DEFAULT_MARGINS)
-    paper_offset = payload.get("paper_offset", PAPER_OFFSET)
-
     try:
-        if mode == "braille":
-            language = str(payload.get("language", "en")).strip() or "en"
-            grade = normalize_grade(payload.get("grade", 1))
-            result = generate_braille_toolpath(
-                text, language=language, grade=grade,
-                paper_size=paper, margins=margins, paper_offset=paper_offset,
-            )
-        else:
-            font_family = str(payload.get("font_family", "")).strip() or DEFAULT_FONT_FAMILY
-            font_size_mm = float(payload.get("font_size_mm", DEFAULT_FONT_SIZE_MM))
-            pen_tip_mm = float(payload.get("pen_tip_mm", DEFAULT_PEN_TIP_MM))
-            render_mode = str(payload.get("render_mode", "outline")).strip()
-            if render_mode not in ("outline", "filled", "centerline"):
-                render_mode = "outline"
-
-            result = generate_write_toolpath(
-                text, font_family, font_size_mm=font_size_mm,
-                paper_size=paper, margins=margins, pen_tip_mm=pen_tip_mm,
-                render_mode=render_mode, paper_offset=paper_offset,
-            )
+        result = build_toolpath_from_payload(payload)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         app.logger.exception("toolpath_preview failed: %s", exc)
         return jsonify({"error": f"Toolpath generation failed: {exc}"}), 500

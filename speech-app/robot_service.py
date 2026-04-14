@@ -21,6 +21,7 @@ def serialize_robot_config(config: dict | None) -> dict | None:
     if not config:
         return None
 
+    transport = config.get("transport", "http")
     result = {
         "base_url": config["base_url"],
         "host": config["host"],
@@ -29,9 +30,9 @@ def serialize_robot_config(config: dict | None) -> dict | None:
         "device_id": config["device_id"],
         "client_name": config["client_name"],
         "paired_at": config["paired_at"],
-        "transport": config.get("transport", "http"),
+        "transport": transport,
     }
-    if config.get("transport") == TRANSPORT_SERIAL:
+    if transport == TRANSPORT_SERIAL:
         result["serial_port"] = config.get("serial_port", "")
     return result
 
@@ -69,6 +70,16 @@ def set_current_robot(app: Flask, config: dict | None) -> None:
     app.config["CURRENT_ROBOT_CONFIG"] = config
 
 
+def _current_robot_port(current_robot: dict | None) -> int | None:
+    if not current_robot:
+        return None
+
+    try:
+        return int(current_robot["port"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def get_robot_connection_state(logger, config: dict) -> dict:
     if config.get("transport") == TRANSPORT_SERIAL:
         port = config.get("serial_port", "")
@@ -102,14 +113,21 @@ def get_robot_connection_state(logger, config: dict) -> dict:
 
 def discover_available_robots(port: int, current_robot: dict | None = None) -> list[dict]:
     candidate_ports = [port]
-    if current_robot and current_robot["port"] not in candidate_ports:
-        candidate_ports.append(int(current_robot["port"]))
+    current_port = _current_robot_port(current_robot)
+    if current_port is not None and current_port not in candidate_ports:
+        candidate_ports.append(current_port)
     return discover_robots(candidate_ports=candidate_ports)
 
 
-def pair_with_robot(logger, host: str, port: int, pairing_code: str, client_name: str) -> tuple[dict, dict]:
-    config = pair_robot(host=host, port=port, pairing_code=pairing_code, client_name=client_name)
+def _pair_and_probe(logger, config: dict) -> tuple[dict, dict]:
     return config, get_robot_connection_state(logger, config)
+
+
+def pair_with_robot(logger, host: str, port: int, pairing_code: str, client_name: str) -> tuple[dict, dict]:
+    return _pair_and_probe(
+        logger,
+        pair_robot(host=host, port=port, pairing_code=pairing_code, client_name=client_name),
+    )
 
 
 def pair_with_robot_usb(logger, serial_port: str, client_name: str) -> tuple[dict, dict]:
@@ -120,7 +138,7 @@ def pair_with_robot_usb(logger, serial_port: str, client_name: str) -> tuple[dic
         config["device_id"],
         serial_port,
     )
-    return config, get_robot_connection_state(logger, config)
+    return _pair_and_probe(logger, config)
 
 
 def unpair_current_robot(config: dict) -> str | None:

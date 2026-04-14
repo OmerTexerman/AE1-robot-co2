@@ -1,5 +1,3 @@
-"""Mock Pico HTTP API for exercising the speech app without hardware."""
-
 import json
 import threading
 import time
@@ -10,12 +8,10 @@ DEVICE_NAME = "MockPico2W"
 DEVICE_ID = "mock-pico-001"
 LISTEN_PORT = 8080
 
-# Match the firmware defaults from pins.py.
 WORK_AREA_X_MM = 247.0
 WORK_AREA_Y_MM = 205.0
 STEPS_PER_MM = 40
 
-# Shared motion state in the same shape returned by the real firmware.
 MOTION_LOCK = threading.Lock()
 MOTION = {
     "status": "idle",
@@ -32,6 +28,12 @@ MOTION = {
 }
 ABORT_REQUESTED = False
 PAIRED_CLIENTS = {}
+JOB_ENDPOINTS = {
+    "/home": "home",
+    "/calibrate": "calibrate",
+    "/jog": "jog",
+    "/move": "move",
+}
 
 
 def _set_motion(**fields):
@@ -45,7 +47,6 @@ def _snapshot():
 
 
 def _run_fake_job(kind, payload):
-    """Simulate a motion job in the background."""
     global ABORT_REQUESTED
 
     if kind == "home":
@@ -92,7 +93,8 @@ def _run_fake_job(kind, payload):
                 pt = op.get("point")
                 if pt is not None:
                     pts = [pt]
-            new_pos = MOTION["position_mm"]
+            snap = _snapshot()
+            new_pos = snap["position_mm"]
             if pts:
                 last = pts[-1]
                 new_pos = [float(last[0]), float(last[1])]
@@ -101,7 +103,7 @@ def _run_fake_job(kind, payload):
                 position_mm=new_pos,
                 progress_pct=round(100.0 * i / total, 1) if total else 0.0,
             )
-            time.sleep(0.05)  # 50ms per op — visible but not slow
+            time.sleep(0.05)
         _set_motion(op_index=total, progress_pct=100.0, status="complete")
         return
 
@@ -114,7 +116,7 @@ def _queue_job(kind, payload):
         if MOTION["status"] == "running":
             return None, "robot is busy"
         ABORT_REQUESTED = False
-        job_id = "{}-{}".format(kind, uuid.uuid4().hex[:6])
+        job_id = f"{kind}-{uuid.uuid4().hex[:6]}"
         MOTION.update({
             "status": "running",
             "kind": kind,
@@ -127,6 +129,17 @@ def _queue_job(kind, payload):
         })
     threading.Thread(target=_run_fake_job, args=(kind, payload), daemon=True).start()
     return job_id, None
+
+
+def _accepted_job_payload(kind, job_id, extra=None):
+    payload = {
+        "accepted": True,
+        "job_id": job_id,
+        "kind": kind,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 class MockRobotHandler(BaseHTTPRequestHandler):
@@ -143,6 +156,20 @@ class MockRobotHandler(BaseHTTPRequestHandler):
         if length:
             return json.loads(self.rfile.read(length))
         return {}
+
+    def _send_job_response(self, kind, payload):
+        job_id, err = _queue_job(kind, payload)
+        if err:
+            self._send_json({"error": err}, 409)
+            return
+
+        extra = {}
+        if kind == "render":
+            operations = payload.get("operations", [])
+            print(f"[MOCK] Accepted render job {job_id}: {len(operations)} operations")
+            extra["operation_count"] = len(operations)
+
+        self._send_json(_accepted_job_payload(kind, job_id, extra), 202)
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -187,43 +214,10 @@ class MockRobotHandler(BaseHTTPRequestHandler):
         elif path == "/unpair":
             PAIRED_CLIENTS.clear()
             self._send_json({"ok": True})
-        elif path == "/home":
-            job_id, err = _queue_job("home", {})
-            if err:
-                self._send_json({"error": err}, 409)
-            else:
-                self._send_json({"accepted": True, "job_id": job_id, "kind": "home"}, 202)
-        elif path == "/calibrate":
-            job_id, err = _queue_job("calibrate", {})
-            if err:
-                self._send_json({"error": err}, 409)
-            else:
-                self._send_json({"accepted": True, "job_id": job_id, "kind": "calibrate"}, 202)
-        elif path == "/jog":
-            job_id, err = _queue_job("jog", body)
-            if err:
-                self._send_json({"error": err}, 409)
-            else:
-                self._send_json({"accepted": True, "job_id": job_id, "kind": "jog"}, 202)
-        elif path == "/move":
-            job_id, err = _queue_job("move", body)
-            if err:
-                self._send_json({"error": err}, 409)
-            else:
-                self._send_json({"accepted": True, "job_id": job_id, "kind": "move"}, 202)
         elif path == "/render":
-            operations = body.get("operations", [])
-            job_id, err = _queue_job("render", {"operations": operations})
-            if err:
-                self._send_json({"error": err}, 409)
-            else:
-                print(f"[MOCK] Accepted render job {job_id}: {len(operations)} operations")
-                self._send_json({
-                    "accepted": True,
-                    "job_id": job_id,
-                    "kind": "render",
-                    "operation_count": len(operations),
-                }, 202)
+            self._send_job_response("render", {"operations": body.get("operations", [])})
+        elif path in JOB_ENDPOINTS:
+            self._send_job_response(JOB_ENDPOINTS[path], body)
         elif path == "/job/abort":
             ABORT_REQUESTED = True
             self._send_json({"aborted": True})

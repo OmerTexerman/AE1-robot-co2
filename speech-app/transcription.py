@@ -18,6 +18,8 @@ def normalize_provider(requested_provider: str | None) -> str:
 
 
 def transcribe_audio(audio_path: Path, provider: str) -> dict[str, str | float | None]:
+    provider = normalize_provider(provider)
+
     if provider == "openai":
         transcription = transcribe_with_openai(audio_path)
     else:

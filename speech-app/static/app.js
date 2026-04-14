@@ -77,6 +77,10 @@ const DEFAULT_ROBOT_PORT = 8080;
 const DEFAULT_PEN_DUTY_MIN = 1600;
 const DEFAULT_PEN_DUTY_MAX = 8000;
 const TRANSPORT_SERIAL = "serial";
+const DEFAULT_ROBOT_STATUS_TEXT = "Pair the speech app to your Pico over USB or the current local network.";
+const NO_TRANSCRIPT_TEXT = "Record and transcribe something first.";
+const UNREACHABLE_ROBOT_TEXT = "Pair with a reachable robot first.";
+const PEN_CALIBRATION_DISABLED_TEXT = "Pen calibration is disabled while the robot is moving.";
 
 let mediaRecorder;
 let audioChunks = [];
@@ -108,13 +112,13 @@ async function updateBrailleGradeOptions(language) {
     for (const opt of brailleSelect.options) opt.disabled = false;
   }
 }
-let activeFontPicker = null; // { triggerEl, subset, currentFamily, onSelect }
+let activeFontPicker = null;
 let robotPollTimer = null;
 let robotStateRequestInFlight = false;
 let robotStateMutationVersion = 0;
 let robotJobPollTimer = null;
 let robotJobInFlight = false;
-let robotJobInPreviewMode = false;   // true while live-tracking on the preview canvas
+let robotJobInPreviewMode = false;
 let lastRobotJobStatus = null;
 
 function escapeHtml(s) {
@@ -156,13 +160,10 @@ async function applyBraillePreview() {
       language,
       brailleGrade(),
     );
-    // Re-check state hasn't changed during the async call
     if (!brailleActive() || currentTranscriptId !== snapshotId) return;
-    transcript.textContent = brailleText;
-    transcript.style.fontFamily = "";
+    updateStyledText(transcript, { text: brailleText, fontFamily: "" });
     braillePreviewActive = true;
   } catch {
-    // Silently fall back to original text
   }
 }
 
@@ -171,11 +172,15 @@ function restoreBraillePreview() {
   braillePreviewActive = false;
   const current = getCurrentTranscript();
   if (current) {
-    transcript.textContent = current.text;
-    transcript.style.fontFamily = cssFontFamily(current.font_family);
+    updateStyledText(transcript, {
+      text: current.text,
+      fontFamily: current.font_family,
+    });
   } else {
-    transcript.textContent = DEFAULT_TRANSCRIPT_TEXT;
-    transcript.style.fontFamily = "";
+    updateStyledText(transcript, {
+      text: DEFAULT_TRANSCRIPT_TEXT,
+      fontFamily: "",
+    });
   }
 }
 
@@ -192,6 +197,39 @@ function ensureFont(family, url) {
 
 function cssFontFamily(family) {
   return `"${family}", sans-serif`;
+}
+
+function updateStyledText(element, { text, fontFamily, fontSize } = {}) {
+  if (!element) return;
+  if (text !== undefined) {
+    element.textContent = text;
+  }
+  if (fontFamily !== undefined) {
+    element.style.fontFamily = fontFamily ? cssFontFamily(fontFamily) : "";
+  }
+  if (fontSize !== undefined) {
+    element.style.fontSize = fontSize === "" ? "" : `${fontSize}px`;
+  }
+}
+
+function setElementDisplay(element, visible) {
+  if (element) {
+    element.style.display = visible ? "" : "none";
+  }
+}
+
+function updateHistoryText(itemId, updates) {
+  const textEl = historyList.querySelector(`[data-history-text-id="${itemId}"]`);
+  updateStyledText(textEl, updates);
+}
+
+function restoreHistoryText(item) {
+  updateHistoryText(item.id, { text: item.text, fontFamily: item.font_family });
+}
+
+function setHistoryBrailleText(item, brailleText) {
+  updateHistoryItem(item.id, { braille_text: brailleText });
+  updateHistoryText(item.id, { text: brailleText, fontFamily: "" });
 }
 
 function buildGoogleFontsUrl(family) {
@@ -314,10 +352,56 @@ function closeFontPicker() {
   activeFontPicker = null;
 }
 
+function historyBrailleOptions(item) {
+  const available = Array.isArray(item.available_grades) ? item.available_grades : [];
+  const options = ['<option value="off">Braille Off</option>'];
+
+  if (!available.length || available.includes(1)) {
+    options.push(`<option value="1"${item.braille_grade === 1 ? " selected" : ""}>Grade 1</option>`);
+  }
+
+  if (!available.length || available.includes(2)) {
+    options.push(`<option value="2"${item.braille_grade === 2 ? " selected" : ""}>Grade 2</option>`);
+  }
+
+  return options.join("");
+}
+
+function renderHistoryItem(item, disableSend) {
+  const showBraille = item.braille_grade !== "off" && item.braille_text;
+  const displayText = showBraille ? item.braille_text : item.text;
+  const displayFont = showBraille ? "" : item.font_family;
+  const textStyle = displayFont
+    ? `font-family:${escapeHtml(cssFontFamily(displayFont))};font-size:${item.font_size}px`
+    : `font-size:${item.font_size}px`;
+
+  return `<div class="history-item" data-history-id="${escapeHtml(item.id)}">
+        <div class="history-copy">
+          <small>${escapeHtml(item.provider)} &middot; ${escapeHtml(item.language || item.script)} &middot; ${escapeHtml(new Date(item.created_at).toLocaleString())}</small>
+          <p style="${textStyle}" data-history-text-id="${escapeHtml(item.id)}">${escapeHtml(displayText)}</p>
+          <div class="history-style-controls">
+            <select class="size-picker" data-history-id="${escapeHtml(item.id)}">
+              ${FONT_SIZES.map((s) => `<option value="${s}"${s === item.font_size ? " selected" : ""}>${s}</option>`).join("")}
+            </select>
+            <button type="button" class="font-trigger" data-history-id="${escapeHtml(item.id)}" data-subset="${escapeHtml(item.script)}">
+              <span class="font-trigger-label">${escapeHtml(item.font_family)}</span>
+              <span class="font-trigger-arrow">&#9662;</span>
+            </button>
+            <select class="braille-picker" data-history-id="${escapeHtml(item.id)}">
+              ${historyBrailleOptions(item)}
+            </select>
+          </div>
+        </div>
+        <div class="history-actions">
+          <button type="button" class="history-send-button" data-history-id="${escapeHtml(item.id)}" ${disableSend ? "disabled" : ""}>Send to Robot</button>
+          <button type="button" class="history-delete-button" data-history-id="${escapeHtml(item.id)}">Delete</button>
+        </div>
+      </div>`;
+}
+
 function renderFontList(fonts, selectedFamily, { hersheyFonts = [] } = {}) {
   let html = "";
 
-  // Hershey fonts section (if provided)
   if (hersheyFonts.length) {
     html += '<div class="font-picker-group-label">Single-stroke (Hershey)</div>';
     html += hersheyFonts
@@ -357,8 +441,6 @@ async function openFontPicker(triggerEl, subset, currentFamily, onSelect, { hers
   fontPickerList.innerHTML = '<div class="font-picker-empty">Loading...</div>';
   fontPickerPanel.classList.add("open");
 
-  // Position near the trigger. Use fixed positioning inside modals so
-  // the picker doesn't scroll away; absolute everywhere else.
   const inModal = !!triggerEl.closest(".modal-overlay");
   const rect = triggerEl.getBoundingClientRect();
   if (inModal) {
@@ -430,9 +512,11 @@ function setCurrentTranscript(item) {
   ensureFont(item.font_family, item.font_url);
   currentTranscriptId = item.id;
   braillePreviewActive = false;
-  transcript.textContent = item.text;
-  transcript.style.fontFamily = cssFontFamily(item.font_family);
-  transcript.style.fontSize = item.font_size + "px";
+  updateStyledText(transcript, {
+    text: item.text,
+    fontFamily: item.font_family,
+    fontSize: item.font_size,
+  });
 
   transcriptFontTrigger.dataset.subset = item.script;
   transcriptFontTrigger.querySelector(".font-trigger-label").textContent = item.font_family;
@@ -446,12 +530,11 @@ function setCurrentTranscript(item) {
 function applyFontChange(id, family) {
   const url = buildGoogleFontsUrl(family);
   ensureFont(family, url);
-  const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
-  if (textEl) textEl.style.fontFamily = cssFontFamily(family);
+  updateHistoryText(id, { fontFamily: family });
   const historyTrigger = historyList.querySelector(`.font-trigger[data-history-id="${id}"] .font-trigger-label`);
   if (historyTrigger) historyTrigger.textContent = family;
   if (currentTranscriptId === id) {
-    transcript.style.fontFamily = cssFontFamily(family);
+    updateStyledText(transcript, { fontFamily: family });
     transcriptFontTrigger.querySelector(".font-trigger-label").textContent = family;
   }
   updateHistoryItem(id, { font_family: family, font_url: url });
@@ -460,9 +543,11 @@ function applyFontChange(id, family) {
 function clearCurrentTranscript() {
   currentTranscriptId = null;
   braillePreviewActive = false;
-  transcript.textContent = DEFAULT_TRANSCRIPT_TEXT;
-  transcript.style.fontFamily = "";
-  transcript.style.fontSize = "";
+  updateStyledText(transcript, {
+    text: DEFAULT_TRANSCRIPT_TEXT,
+    fontFamily: "",
+    fontSize: "",
+  });
   transcriptFontTrigger.dataset.subset = "latin";
   transcriptFontTrigger.querySelector(".font-trigger-label").textContent = "Font";
   transcriptSizePicker.value = String(DEFAULT_FONT_SIZE);
@@ -508,39 +593,7 @@ function renderHistory(items) {
   }
 
   const disableSend = activeRobotAction !== null || !pairedRobot || !robotConnected;
-  historyList.innerHTML = items
-    .map(
-      (i) => {
-        const showBraille = i.braille_grade !== "off" && i.braille_text;
-        const displayText = showBraille ? i.braille_text : i.text;
-        const displayFont = showBraille ? "" : cssFontFamily(escapeHtml(i.font_family));
-        return `<div class="history-item" data-history-id="${escapeHtml(i.id)}">
-        <div class="history-copy">
-          <small>${escapeHtml(i.provider)} &middot; ${escapeHtml(i.language || i.script)} &middot; ${escapeHtml(new Date(i.created_at).toLocaleString())}</small>
-          <p style="font-family:${displayFont};font-size:${i.font_size}px" data-history-text-id="${escapeHtml(i.id)}">${escapeHtml(displayText)}</p>
-          <div class="history-style-controls">
-            <select class="size-picker" data-history-id="${escapeHtml(i.id)}">
-              ${FONT_SIZES.map((s) => `<option value="${s}"${s === i.font_size ? " selected" : ""}>${s}</option>`).join("")}
-            </select>
-            <button type="button" class="font-trigger" data-history-id="${escapeHtml(i.id)}" data-subset="${escapeHtml(i.script)}">
-              <span class="font-trigger-label">${escapeHtml(i.font_family)}</span>
-              <span class="font-trigger-arrow">&#9662;</span>
-            </button>
-            <select class="braille-picker" data-history-id="${escapeHtml(i.id)}">
-              <option value="off"${i.braille_grade === "off" ? " selected" : ""}>Braille Off</option>
-              ${!(i.available_grades || []).length || (i.available_grades || []).includes(1) ? `<option value="1"${i.braille_grade === 1 ? " selected" : ""}>Grade 1</option>` : ""}
-              ${!(i.available_grades || []).length || (i.available_grades || []).includes(2) ? `<option value="2"${i.braille_grade === 2 ? " selected" : ""}>Grade 2</option>` : ""}
-            </select>
-          </div>
-        </div>
-        <div class="history-actions">
-          <button type="button" class="history-send-button" data-history-id="${escapeHtml(i.id)}" ${disableSend ? "disabled" : ""}>Send to Robot</button>
-          <button type="button" class="history-delete-button" data-history-id="${escapeHtml(i.id)}">Delete</button>
-        </div>
-      </div>`;
-      }
-    )
-    .join("");
+  historyList.innerHTML = items.map((item) => renderHistoryItem(item, disableSend)).join("");
 
   updateHistoryActionButtons();
 }
@@ -550,12 +603,7 @@ function hydrateBrailleHistoryRows(items = transcriptHistory) {
     if (!item || item.braille_grade === "off" || item.braille_text) return;
     fetchBraillePreview(item.text, item.language, Number(item.braille_grade))
       .then((brailleText) => {
-        updateHistoryItem(item.id, { braille_text: brailleText });
-        const textEl = historyList.querySelector(`[data-history-text-id="${item.id}"]`);
-        if (textEl) {
-          textEl.textContent = brailleText;
-          textEl.style.fontFamily = "";
-        }
+        setHistoryBrailleText(item, brailleText);
       })
       .catch(() => {});
   });
@@ -588,8 +636,8 @@ function syncRobotControls() {
     if (!pairedRobot || !robotConnected) {
       setPenCalibrationMessage("");
     } else if (robotJobInFlight) {
-      setPenCalibrationMessage("Pen calibration is disabled while the robot is moving.");
-    } else if (penCalibrationMessage?.textContent === "Pen calibration is disabled while the robot is moving.") {
+      setPenCalibrationMessage(PEN_CALIBRATION_DISABLED_TEXT);
+    } else if (penCalibrationMessage?.textContent === PEN_CALIBRATION_DISABLED_TEXT) {
       setPenCalibrationMessage("");
     }
   }
@@ -636,7 +684,7 @@ function renderRobotState(payload, options = {}) {
     if (payload.warning) {
       robotStatus.textContent = payload.warning;
     } else if (!preserveStatus) {
-      robotStatus.textContent = "Pair the speech app to your Pico over USB or the current local network.";
+      robotStatus.textContent = DEFAULT_ROBOT_STATUS_TEXT;
     }
     robotMeta.innerHTML = "";
     syncRobotControls();
@@ -663,7 +711,6 @@ function renderRobotState(payload, options = {}) {
   syncRobotControls();
   scheduleRobotPoll();
 
-  // Resume polling after reload if the robot is already busy.
   const motionStatus = payload.status?.motion?.status;
   if ((motionStatus === "running" || motionStatus === "queued") && !robotJobInFlight) {
     startJobPolling();
@@ -844,11 +891,11 @@ async function unpairRobot() {
 
 async function sendTranscriptPayloadToRobot(transcriptToSend) {
   if (!transcriptToSend) {
-    robotStatus.textContent = "Record and transcribe something first.";
+    robotStatus.textContent = NO_TRANSCRIPT_TEXT;
     return;
   }
   if (!pairedRobot || !robotConnected) {
-    robotStatus.textContent = "Pair with a reachable robot first.";
+    robotStatus.textContent = UNREACHABLE_ROBOT_TEXT;
     return;
   }
 
@@ -911,7 +958,6 @@ async function pollRobotJob() {
   try {
     data = await fetchJson("/robot/job");
   } catch (e) {
-    // Transient error: retry without tearing down UI state.
     robotJobPollTimer = window.setTimeout(pollRobotJob, 1500);
     return;
   }
@@ -945,47 +991,36 @@ function startJobPolling({ inPreviewMode = false } = {}) {
 }
 
 function updateRobotJobUi(data) {
-  if (!data || data.status === "idle" || !data.status) {
-    robotJobIndicator.hidden = true;
-    robotJobIndicator.textContent = "";
-  } else {
-    robotJobIndicator.hidden = false;
-    const kind = data.kind || "job";
-    if (data.status === "running" || data.status === "queued") {
-      const total = data.total_ops || 0;
-      if (total > 0) {
-        robotJobIndicator.textContent = `${kind}: ${data.op_index || 0}/${total} (${data.progress_pct || 0}%)`;
-      } else {
-        robotJobIndicator.textContent = `${kind}: ${data.status}`;
-      }
-    } else {
-      robotJobIndicator.textContent = `${kind}: ${data.status}`;
-    }
-  }
+  const status = data?.status;
+  const kind = data?.kind || "job";
+  const active = Boolean(status && status !== "idle");
+  const running = status === "running" || status === "queued";
+  const total = data?.total_ops || 0;
+
+  robotJobIndicator.hidden = !active;
+  robotJobIndicator.textContent = !active
+    ? ""
+    : running && total > 0
+      ? `${kind}: ${data.op_index || 0}/${total} (${data.progress_pct || 0}%)`
+      : `${kind}: ${status}`;
 
   abortRobotButton.disabled = !(data && data.status === "running");
 
-  if (previewModal.style.display !== "none" && previewJobStatus) {
-    if (!data || data.status === "idle") {
-      previewJobStatus.hidden = true;
-    } else if (data.status === "queued") {
-      previewJobStatus.hidden = false;
+  if (!previewModal.hidden && previewJobStatus) {
+    previewJobStatus.hidden = !active;
+    if (!active) {
+      previewJobStatus.textContent = "";
+    } else if (status === "queued") {
       previewJobStatus.textContent = "Queued on robot...";
-    } else if (data.status === "running") {
-      previewJobStatus.hidden = false;
-      const total = data.total_ops || 0;
-      const opIdx = data.op_index || 0;
+    } else if (status === "running") {
       previewJobStatus.textContent = total > 0
-        ? `Drawing: ${opIdx}/${total} ops (${data.progress_pct || 0}%)`
-        : `Drawing...`;
-    } else if (data.status === "complete") {
-      previewJobStatus.hidden = false;
+        ? `Drawing: ${data.op_index || 0}/${total} ops (${data.progress_pct || 0}%)`
+        : "Drawing...";
+    } else if (status === "complete") {
       previewJobStatus.textContent = "Done.";
-    } else if (data.status === "failed") {
-      previewJobStatus.hidden = false;
+    } else if (status === "failed") {
       previewJobStatus.textContent = `Failed: ${data.error || "unknown error"}`;
-    } else if (data.status === "aborted") {
-      previewJobStatus.hidden = false;
+    } else if (status === "aborted") {
       previewJobStatus.textContent = "Aborted.";
     }
   }
@@ -1041,7 +1076,7 @@ function onRobotJobTerminal(data) {
 
 async function homeRobot() {
   if (!pairedRobot || !robotConnected) {
-    robotStatus.textContent = "Pair with a reachable robot first.";
+    robotStatus.textContent = UNREACHABLE_ROBOT_TEXT;
     return;
   }
   try {
@@ -1057,7 +1092,7 @@ async function homeRobot() {
 
 async function calibrateRobot() {
   if (!pairedRobot || !robotConnected) {
-    robotStatus.textContent = "Pair with a reachable robot first.";
+    robotStatus.textContent = UNREACHABLE_ROBOT_TEXT;
     return;
   }
   try {
@@ -1078,10 +1113,6 @@ async function abortRobotJob() {
     robotStatus.textContent = e.message || "Abort failed.";
   }
 }
-
-// ---------------------------------------------------------------------------
-// Pen servo calibration slider
-// ---------------------------------------------------------------------------
 
 let penSetInFlight = false;
 let pendingPenDuty = null;
@@ -1219,12 +1250,11 @@ async function sendPreviewToRobot() {
   if (!pairedRobot || !robotConnected) {
     if (previewJobStatus) {
       previewJobStatus.hidden = false;
-      previewJobStatus.textContent = "Pair with a reachable robot first.";
+      previewJobStatus.textContent = UNREACHABLE_ROBOT_TEXT;
     }
     return;
   }
 
-  // Switch from canned animation to live robot tracking.
   stopPreviewAnimation();
   if (previewAnimationState) {
     previewAnimationState.completedOps = [];
@@ -1360,10 +1390,9 @@ historyList.addEventListener("change", (event) => {
   if (picker) {
     const id = picker.dataset.historyId || "";
     const size = Number(picker.value);
-    const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
-    if (textEl) textEl.style.fontSize = size + "px";
+    updateHistoryText(id, { fontSize: size });
     if (currentTranscriptId === id) {
-      transcript.style.fontSize = size + "px";
+      updateStyledText(transcript, { fontSize: size });
       transcriptSizePicker.value = String(size);
     }
     updateHistoryItem(id, { font_size: size });
@@ -1375,23 +1404,18 @@ historyList.addEventListener("change", (event) => {
     const id = braillePicker.dataset.historyId || "";
     const item = findTranscriptInHistory(id);
     if (!item) return;
-    const textEl = historyList.querySelector(`[data-history-text-id="${id}"]`);
-    if (!textEl) return;
     const val = braillePicker.value;
     const grade = val === "off" ? "off" : Number(val);
     updateHistoryItem(id, { braille_grade: grade });
 
     if (grade === "off") {
       updateHistoryItem(id, { braille_text: "" });
-      textEl.textContent = item.text;
-      textEl.style.fontFamily = cssFontFamily(item.font_family);
+      restoreHistoryText(item);
     } else {
       braillePicker.disabled = true;
       fetchBraillePreview(item.text, item.language, grade)
         .then((brailleText) => {
-          updateHistoryItem(id, { braille_text: brailleText });
-          textEl.textContent = brailleText;
-          textEl.style.fontFamily = "";
+          setHistoryBrailleText(item, brailleText);
         })
         .catch(() => {})
         .finally(() => { braillePicker.disabled = false; });
@@ -1411,10 +1435,9 @@ historyList.addEventListener("change", (event) => {
 
 transcriptSizePicker.addEventListener("change", () => {
   const size = Number(transcriptSizePicker.value);
-  transcript.style.fontSize = size + "px";
+  updateStyledText(transcript, { fontSize: size });
   if (currentTranscriptId) {
-    const textEl = historyList.querySelector(`[data-history-text-id="${currentTranscriptId}"]`);
-    if (textEl) textEl.style.fontSize = size + "px";
+    updateHistoryText(currentTranscriptId, { fontSize: size });
     const historyPicker = historyList.querySelector(`.size-picker[data-history-id="${currentTranscriptId}"]`);
     if (historyPicker) historyPicker.value = String(size);
     updateHistoryItem(currentTranscriptId, { font_size: size });
@@ -1435,7 +1458,7 @@ transcriptFontTrigger.addEventListener("click", () => {
       } else {
         const url = buildGoogleFontsUrl(family);
         ensureFont(family, url);
-        transcript.style.fontFamily = cssFontFamily(family);
+        updateStyledText(transcript, { fontFamily: family });
       }
     }
   );
@@ -1491,18 +1514,14 @@ brailleSelect.addEventListener("change", () => {
     const historyBraille = historyList.querySelector(`.braille-picker[data-history-id="${currentTranscriptId}"]`);
     if (historyBraille) historyBraille.value = String(grade === "off" ? "off" : grade);
     const item = findTranscriptInHistory(currentTranscriptId);
-    const textEl = historyList.querySelector(`[data-history-text-id="${currentTranscriptId}"]`);
-    if (item && textEl) {
+    if (item) {
       if (grade === "off") {
         updateHistoryItem(currentTranscriptId, { braille_text: "" });
-        textEl.textContent = item.text;
-        textEl.style.fontFamily = cssFontFamily(item.font_family);
+        restoreHistoryText(item);
       } else {
         fetchBraillePreview(item.text, item.language, grade)
           .then((brailleText) => {
-            updateHistoryItem(currentTranscriptId, { braille_text: brailleText });
-            textEl.textContent = brailleText;
-            textEl.style.fontFamily = "";
+            setHistoryBrailleText(item, brailleText);
           })
           .catch(() => {});
       }
@@ -1656,6 +1675,26 @@ function renderPreviewStats(data) {
   }
 }
 
+function stepPreviewAnimation(state, ctx, canvas, timestamp) {
+  if (!state.playing || state.done) {
+    state.animFrameId = null;
+    return;
+  }
+
+  if (!state.lastTime) state.lastTime = timestamp;
+  const dt = timestamp - state.lastTime;
+  state.lastTime = timestamp;
+
+  advanceAnimation(state, state.pixelsPerMs * state.speed * dt);
+  drawFrame(ctx, canvas, state);
+
+  if (!state.done) {
+    state.animFrameId = requestAnimationFrame((ts) => stepPreviewAnimation(state, ctx, canvas, ts));
+  } else {
+    previewPlayPause.textContent = "\u25B6";
+  }
+}
+
 function startPreviewAnimation(data) {
   stopPreviewAnimation();
 
@@ -1714,33 +1753,13 @@ function startPreviewAnimation(data) {
     toolheadPos: null,
     animFrameId: null,
     lastTime: null,
-    pixelsPerMs: 0.15,  // base animation speed in mm/ms
+    pixelsPerMs: 0.15,
   };
 
   previewAnimationState = state;
   previewPlayPause.textContent = "\u23F8";
-
-  function animate(timestamp) {
-    if (!state.playing || state.done) {
-      state.animFrameId = null;
-      return;
-    }
-
-    if (!state.lastTime) state.lastTime = timestamp;
-    const dt = timestamp - state.lastTime;
-    state.lastTime = timestamp;
-
-    const advanceMm = state.pixelsPerMs * state.speed * dt;
-    advanceAnimation(state, advanceMm);
-    drawFrame(ctx, canvas, state);
-
-    if (!state.done) {
-      state.animFrameId = requestAnimationFrame(animate);
-    }
-  }
-
   drawFrame(ctx, canvas, state);
-  state.animFrameId = requestAnimationFrame(animate);
+  state.animFrameId = requestAnimationFrame((timestamp) => stepPreviewAnimation(state, ctx, canvas, timestamp));
 }
 
 function advanceAnimation(state, advanceMm) {
@@ -2025,7 +2044,6 @@ function skipPreviewAnimation() {
 }
 
 function pxToMm(px) {
-  // Use 0.25 mm/px so the preset sizes map cleanly.
   return Math.round(px * 0.25 * 2) / 2;
 }
 
@@ -2035,7 +2053,12 @@ function itemBrailleActive(item) {
 
 function openPreviewModal(item) {
   previewTranscriptItem = item;
-  previewModal.style.display = "";
+  previewModal.hidden = false;
+  customPaperFields.hidden = previewPaperSize.value !== "Custom";
+  if (previewJobStatus) {
+    previewJobStatus.hidden = true;
+    previewJobStatus.textContent = "";
+  }
 
   const isBraille = itemBrailleActive(item);
 
@@ -2045,9 +2068,9 @@ function openPreviewModal(item) {
 
   const fontLabel = previewFontTrigger.closest("label");
   if (isBraille) {
-    if (fontLabel) fontLabel.style.display = "none";
+    setElementDisplay(fontLabel, false);
   } else {
-    if (fontLabel) fontLabel.style.display = "";
+    setElementDisplay(fontLabel, true);
     setPreviewFont(item.font_family);
     previewFontTrigger.dataset.subset = item.script || "latin";
   }
@@ -2056,20 +2079,20 @@ function openPreviewModal(item) {
   const fontSizeLabel = previewFontSize.closest("label");
   const penTipLabel = previewPenTip.closest("label");
   if (isBraille) {
-    if (renderModeLabel) renderModeLabel.style.display = "none";
-    if (fontSizeLabel) fontSizeLabel.style.display = "none";
-    if (penTipLabel) penTipLabel.style.display = "none";
+    setElementDisplay(renderModeLabel, false);
+    setElementDisplay(fontSizeLabel, false);
+    setElementDisplay(penTipLabel, false);
   } else {
-    if (renderModeLabel) renderModeLabel.style.display = "";
-    if (fontSizeLabel) fontSizeLabel.style.display = "";
-    if (penTipLabel) penTipLabel.style.display = "";
+    setElementDisplay(renderModeLabel, true);
+    setElementDisplay(fontSizeLabel, true);
+    setElementDisplay(penTipLabel, true);
   }
 
   fetchPreview(item);
 }
 
 function closePreviewModal() {
-  previewModal.style.display = "none";
+  previewModal.hidden = true;
   stopPreviewAnimation();
   currentPreviewData = null;
   previewTranscriptItem = null;
@@ -2097,19 +2120,9 @@ previewPlayPause.addEventListener("click", () => {
   previewPlayPause.textContent = previewAnimationState.playing ? "\u23F8" : "\u25B6";
   if (previewAnimationState.playing) {
     previewAnimationState.lastTime = null;
-    previewAnimationState.animFrameId = requestAnimationFrame(function animate(ts) {
-      if (!previewAnimationState?.playing || previewAnimationState.done) return;
-      if (!previewAnimationState.lastTime) previewAnimationState.lastTime = ts;
-      const dt = ts - previewAnimationState.lastTime;
-      previewAnimationState.lastTime = ts;
-      advanceAnimation(previewAnimationState, previewAnimationState.pixelsPerMs * previewAnimationState.speed * dt);
-      drawFrame(previewCanvas.getContext("2d"), previewCanvas, previewAnimationState);
-      if (!previewAnimationState.done) {
-        previewAnimationState.animFrameId = requestAnimationFrame(animate);
-      } else {
-        previewPlayPause.textContent = "\u25B6";
-      }
-    });
+    previewAnimationState.animFrameId = requestAnimationFrame((timestamp) =>
+      stepPreviewAnimation(previewAnimationState, previewCanvas.getContext("2d"), previewCanvas, timestamp)
+    );
   }
 });
 
@@ -2126,7 +2139,7 @@ previewSpeed.addEventListener("change", () => {
 });
 
 previewPaperSize.addEventListener("change", () => {
-  customPaperFields.style.display = previewPaperSize.value === "Custom" ? "" : "none";
+  customPaperFields.hidden = previewPaperSize.value !== "Custom";
   debouncedRefreshPreview();
 });
 for (const el of [
@@ -2148,7 +2161,7 @@ previewFontTrigger.addEventListener("click", () => {
 
 function handleSendToRobot(item) {
   if (!item) {
-    robotStatus.textContent = "Record and transcribe something first.";
+    robotStatus.textContent = NO_TRANSCRIPT_TEXT;
     return;
   }
   openPreviewModal(item);

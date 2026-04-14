@@ -138,6 +138,11 @@ class Motion:
         """Abort the running job at the next yield point."""
         self._abort_requested = True
 
+    def _raise_if_aborted(self):
+        if self._abort_requested:
+            self.homed = False
+            raise MotionError("aborted")
+
     def reset_job_state(self):
         self._job_state["status"]   = STATUS_IDLE
         self._job_state["job_id"]   = None
@@ -172,6 +177,7 @@ class Motion:
         self._stepA.value(0); self._stepB.value(0)
         time.sleep_ms(2)
         for _ in range(steps):
+            self._raise_if_aborted()
             self._stepA.value(1); self._stepB.value(1)
             time.sleep_us(half_us)
             self._stepA.value(0); self._stepB.value(0)
@@ -185,6 +191,7 @@ class Motion:
         self._stepA.value(0); self._stepB.value(0)
         time.sleep_ms(2)
         for i in range(max_steps):
+            self._raise_if_aborted()
             if target_switch.value() == 0:
                 self._stepA.value(0); self._stepB.value(0)
                 time.sleep_ms(pins.HOME_SWITCH_SETTLE_MS)
@@ -208,7 +215,6 @@ class Motion:
 
     def home(self):
         """Drive to top-left, set logical position to (0, 0). Pen lifted first."""
-        self._abort_requested = False
         self.pen.up()
         self.homed = False
 
@@ -360,7 +366,6 @@ class Motion:
 
         try:
             for i, op in enumerate(operations):
-                self._job_state["op_index"] = i
                 op_type = op.get("type", "draw")
 
                 if op_type == "draw":
@@ -370,7 +375,8 @@ class Motion:
                 elif op_type == "punch":
                     self._execute_punch(op, half_us)
                 else:
-                    pass
+                    raise MotionError("unknown operation type: {}".format(op_type))
+                self._job_state["op_index"] = i + 1
 
             self._job_state["op_index"] = len(operations)
             self._job_state["status"] = STATUS_COMPLETE

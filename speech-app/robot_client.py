@@ -295,7 +295,6 @@ def unpair_robot(config: dict) -> dict:
 
 
 def send_paths_job(config: dict, operations: list, mode: str = "write") -> dict:
-    """Queue a pre-generated toolpath on the robot."""
     return _transport_request(config, "POST", "/render", json_body={
         "mode": mode,
         "operations": operations,
@@ -304,17 +303,14 @@ def send_paths_job(config: dict, operations: list, mode: str = "write") -> dict:
 
 
 def send_home_command(config: dict) -> dict:
-    """Queue a homing job."""
     return _transport_request(config, "POST", "/home")
 
 
 def send_calibrate_command(config: dict) -> dict:
-    """Queue a full calibration sweep."""
     return _transport_request(config, "POST", "/calibrate")
 
 
 def send_jog_command(config: dict, dx_mm: float, dy_mm: float) -> dict:
-    """Queue a relative jog."""
     return _transport_request(config, "POST", "/jog", json_body={
         "dx": dx_mm,
         "dy": dy_mm,
@@ -322,7 +318,6 @@ def send_jog_command(config: dict, dx_mm: float, dy_mm: float) -> dict:
 
 
 def send_move_command(config: dict, x_mm: float, y_mm: float) -> dict:
-    """Queue an absolute move."""
     return _transport_request(config, "POST", "/move", json_body={
         "x": x_mm,
         "y": y_mm,
@@ -330,7 +325,6 @@ def send_move_command(config: dict, x_mm: float, y_mm: float) -> dict:
 
 
 def send_abort_command(config: dict) -> dict:
-    """Request the running job to abort."""
     return _transport_request(config, "POST", "/job/abort")
 
 
@@ -344,13 +338,15 @@ def send_pen_save(
     pen_down_duty: int | None = None,
     punch_duty: int | None = None,
 ) -> dict:
-    body = {}
-    if pen_up_duty is not None:
-        body["pen_up_duty"] = pen_up_duty
-    if pen_down_duty is not None:
-        body["pen_down_duty"] = pen_down_duty
-    if punch_duty is not None:
-        body["punch_duty"] = punch_duty
+    body = {
+        key: value
+        for key, value in (
+            ("pen_up_duty", pen_up_duty),
+            ("pen_down_duty", pen_down_duty),
+            ("punch_duty", punch_duty),
+        )
+        if value is not None
+    }
     return _transport_request(config, "POST", "/pen/save", json_body=body)
 
 
@@ -359,7 +355,6 @@ def fetch_pen_config(config: dict) -> dict:
 
 
 def fetch_job_status(config: dict) -> dict:
-    """Fetch the current job or motion state."""
     return _transport_request(config, "GET", "/job")
 
 
@@ -559,7 +554,6 @@ def active_hello_probe(candidate_ports: list[int] | None = None) -> list[dict]:
             if robot is None:
                 continue
             discovered[_robot_key(robot)] = robot
-            # One positive response is enough for the active probe fallback.
             for pending in futures:
                 pending.cancel()
             break

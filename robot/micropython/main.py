@@ -177,7 +177,7 @@ def parse_request(client):
         try:
             payload = ujson.loads(body.decode())
         except ValueError:
-            payload = {}
+            raise ValueError("invalid json body")
 
     qs = ""
     if "?" in path:
@@ -769,6 +769,7 @@ def _run_pending_job():
     js["status"] = STATUS_RUNNING
     js["kind"] = kind
     js["job_id"] = job_id
+    _motion._abort_requested = False
 
     try:
         if kind == "home":

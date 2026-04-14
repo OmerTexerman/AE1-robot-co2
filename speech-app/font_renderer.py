@@ -37,7 +37,12 @@ def get_ttf_path(font_family: str) -> Path:
     safe_name = hashlib.md5(font_family.encode()).hexdigest()
     cached = FONT_CACHE_DIR / f"{safe_name}.ttf"
     if cached.exists():
-        return cached
+        try:
+            TTFont(cached).close()
+            return cached
+        except Exception:
+            logger.warning("Discarding corrupted cached font '%s'", font_family)
+            cached.unlink(missing_ok=True)
 
     url = get_ttf_url(font_family)
     if not url:
@@ -46,7 +51,14 @@ def get_ttf_path(font_family: str) -> Path:
     logger.info("Downloading TTF for '%s'", font_family)
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
-    cached.write_bytes(resp.content)
+    tmp_path = cached.with_name(f"{cached.name}.tmp")
+    tmp_path.write_bytes(resp.content)
+    try:
+        TTFont(tmp_path).close()
+        tmp_path.replace(cached)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return cached
 
 
@@ -171,7 +183,7 @@ def _shape_text(ttf_path, text):
     infos = buf.glyph_infos
     positions = buf.glyph_positions
 
-    return font, face, infos, positions
+    return infos, positions
 
 
 def get_font_metrics(ttf_path, font_size_mm):
@@ -198,12 +210,10 @@ def get_glyph_outlines(ttf_path, text, font_size_mm):
     """Extract glyph outlines as polylines in mm, using HarfBuzz for shaping."""
     ttf_path = Path(ttf_path)
     tt = TTFont(ttf_path)
-    glyf_table = tt.get("glyf")
-    cff_table = tt.get("CFF ")
     upem = tt["head"].unitsPerEm
     scale = font_size_mm / upem
 
-    font, face, infos, positions = _shape_text(ttf_path, text)
+    infos, positions = _shape_text(ttf_path, text)
     glyphset = tt.getGlyphSet()
 
     results = []

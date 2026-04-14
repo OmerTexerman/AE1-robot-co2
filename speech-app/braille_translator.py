@@ -71,7 +71,7 @@ def translate_to_braille(text: str, language: str, grade: int) -> list[list[int]
 
 
 def available_grades(language: str) -> list[int]:
-    has_g1 = language in _G1_OVERRIDES or _try_dynamic_table(language)
+    has_g1 = True
     has_g2 = language in _G2_TABLE
     grades: list[int] = []
     if has_g1:
